@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf }}">
+  <title>算力工坊 · Compute Studio</title>
+  <link rel="icon" type="image/png" href="{{ asset_url('assets/compute-studio-logo.png') }}">
+  <link rel="stylesheet" href="{{ asset_url('style.css') }}">
+  <link rel="stylesheet" href="{{ asset_url('workspace.css') }}">
+  <link rel="stylesheet" href="{{ asset_url('transfers.css') }}">
+  <link rel="stylesheet" href="{{ asset_url('datasets.css') }}">
+  <link rel="stylesheet" href="{{ asset_url('studio.css') }}">
+  <link rel="stylesheet" href="{{ asset_url('files-workspace.css') }}">
+  <link rel="stylesheet" href="{{ asset_url('details.css') }}">
+  <link rel="stylesheet" href="{{ asset_url('vendor/katex/dist/katex.min.css') }}">
+  <link rel="stylesheet" href="{{ asset_url('notes-markdown.css') }}">
+  <script defer src="{{ asset_url('app.js') }}"></script>
+  <script defer src="{{ asset_url('vendor/marked/lib/marked.umd.js') }}"></script>
+  <script defer src="{{ asset_url('vendor/dompurify/dist/purify.min.js') }}"></script>
+  <script defer src="{{ asset_url('vendor/katex/dist/katex.min.js') }}"></script>
+  <script defer src="{{ asset_url('notes-markdown-core.js') }}"></script>
+  <script defer src="{{ asset_url('notes-markdown.js') }}"></script>
+  <script defer src="{{ asset_url('graph-layout.js') }}"></script>
+  <script defer src="{{ asset_url('benchmark-state.js') }}"></script>
+  <script defer src="{{ asset_url('workspace.js') }}"></script>
+  <script defer src="{{ asset_url('transfers.js') }}"></script>
+  <script defer src="{{ asset_url('datasets.js') }}"></script>
+  <script defer src="{{ asset_url('environments.js') }}"></script>
+  <script defer src="{{ asset_url('studio.js') }}"></script>
+  <script defer src="{{ asset_url('files-workspace.js') }}"></script>
+  <script defer src="{{ asset_url('details.js') }}"></script>
+  <script defer src="{{ asset_url('import-flow.js') }}"></script>
+  <link rel="stylesheet" href="{{ asset_url('task-imports.css') }}">
+  <script defer src="{{ asset_url('task-imports.js') }}"></script>
+  <link rel="stylesheet" href="{{ asset_url('experiment-controls.css') }}">
+  <script defer src="{{ asset_url('experiment-controls.js') }}"></script>
+  <link rel="stylesheet" href="{{ asset_url('dialog-layout.css') }}">
+  <script defer src="{{ asset_url('dialog-layout.js') }}"></script>
+  <link rel="stylesheet" href="{{ asset_url('bulk-scheduling.css') }}">
+  <script defer src="{{ asset_url('bulk-scheduling.js') }}"></script>
+  <link rel="stylesheet" href="{{ asset_url('graph-polish.css') }}">
+  <link rel="stylesheet" href="{{ asset_url('runtime-status.css') }}">
+  <script defer src="{{ asset_url('runtime-status.js') }}"></script>
+  <link rel="stylesheet" href="{{ asset_url('review-polish.css') }}">
+  <link rel="stylesheet" href="{{ asset_url('content-workspace.css') }}">
+  <script defer src="{{ asset_url('content-workspace.js') }}"></script>
+  <link rel="stylesheet" href="{{ asset_url('source-sync.css') }}">
+  <script defer src="{{ asset_url('source-sync.js') }}"></script>
+  <link rel="stylesheet" href="{{ asset_url('import-config.css') }}">
+  <script defer src="{{ asset_url('import-config.js') }}"></script>
+  <link rel="stylesheet" href="{{ asset_url('task-filters.css') }}">
+  <script defer src="{{ asset_url('task-filters.js') }}"></script>
+  <link rel="stylesheet" href="{{ asset_url('project-archive.css') }}">
+  <script defer src="{{ asset_url('project-archive.js') }}"></script>
+  <link rel="stylesheet" href="{{ asset_url('project-results.css') }}">
+  <script defer src="{{ asset_url('project-results.js') }}"></script>
+  <link rel="stylesheet" href="{{ asset_url('dataset-notes.css') }}">
+  <script defer src="{{ asset_url('dataset-notes.js') }}"></script>
+  <link rel="stylesheet" href="{{ asset_url('task-archive.css') }}">
+  <script defer src="{{ asset_url('task-archive.js') }}"></script>
+</head>
+<body data-authorized="{{ 'true' if authorized else 'false' }}">
+{% if not authorized %}
+<main class="login-shell"><section class="login-story"><a class="brand" href="/"><img class="brand-logo" src="{{ asset_url('assets/compute-studio-logo.png') }}" alt="算力工坊 Logo" width="48" height="48"><span>算力工坊<small>Compute Studio</small></span></a><div class="login-story-copy"><p class="eyebrow">A WORKSPACE FOR YOUR RESEARCH</p><h1>让实验有序，<br>让算力就位。</h1><p>从第一行代码，到最后一组结果。<br>把项目、服务器与实验连接起来。</p><div class="login-workflow"><span>项目代码</span><i>→</i><span>GPU 实验</span><i>→</i><span>结果回传</span></div></div><small class="login-story-foot">项目管理 · 自动调度 · 文件同步</small></section><section class="login"><p class="eyebrow">COMPUTE STUDIO</p><h2>欢迎回到算力工坊</h2><p class="muted">登录你的本机研究工作空间。</p><form id="login-form"><label>访问令牌<input name="token" type="password" required autofocus autocomplete="current-password" placeholder="粘贴访问令牌"></label><button class="primary">进入工作台 →</button></form><p id="login-error" class="error-text"></p><details class="login-token-help"><summary>在哪里找到访问令牌？</summary><p>读取控制器本机文件：</p><code class="break">{{ token_path }}</code></details><div class="login-trust"><span class="dot green"></span>本机连接 · 数据保存在你的工作空间</div></section></main>
+{% else %}
+<aside class="sidebar"><a class="brand" href="#overview"><img class="brand-logo" src="{{ asset_url('assets/compute-studio-logo.png') }}" alt="Compute Studio logo" width="44" height="44"><span>算力工坊<small>Compute Studio</small></span></a><div class="nav-label">工作空间</div><nav><a href="#overview" data-nav="overview">◈ <span>资源总览</span></a><a href="#projects" data-nav="projects">▦ <span>项目空间</span></a><a href="#tasks" data-nav="tasks">↗ <span>实验队列</span></a><a href="#uploads" data-nav="uploads">⇧ <span>上传与进度</span></a><a href="#datasets" data-nav="datasets">◫ <span>数据集</span></a></nav><div class="nav-label">基础设施</div><nav><a href="#benchmarks" data-nav="benchmarks">◷ <span>GPU 性能测试</span></a><a href="#servers" data-nav="servers">▤ <span>服务器</span></a><a href="#settings" data-nav="settings">⚙ <span>调度设置</span></a><a href="#events" data-nav="events">≡ <span>操作记录</span></a></nav><div class="sidebar-foot"><span class="dot green"></span> 本机控制器<small>SSH · SHA-256 · 结果回传</small></div></aside>
+<div class="workspace"><header class="topbar"><div><span class="muted">工作空间</span><span class="separator">/</span><span id="breadcrumb">资源总览</span></div><div class="top-actions"><span id="connection-state" class="muted">正在连接…</span><button data-action="refresh" class="icon-button" title="刷新页面" aria-label="刷新页面">↻</button><button data-action="toggle-scheduler" id="scheduler-button">暂停调度</button></div></header><main id="main" class="content"><div class="loading">正在加载工作空间…</div></main></div>
+<dialog id="dialog" aria-labelledby="dialog-title"><div class="dialog-top"><h2 id="dialog-title"></h2><button data-action="close-dialog" class="icon-button" aria-label="关闭">×</button></div><div id="dialog-body"></div></dialog><div id="toasts" aria-live="polite"></div>
+{% endif %}
+</body></html>

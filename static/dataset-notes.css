@@ -1,0 +1,17 @@
+.dataset-note{margin:18px 0;padding:16px 18px;background:#f7f9fc;border:1px solid #e7edf5;border-radius:14px;min-width:0}
+.dataset-note-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;color:#425771;font-size:14px;font-weight:600}
+.dataset-note-heading>span{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.dataset-note-heading small{font-weight:400;color:#8796aa;font-size:12px}
+.dataset-note-heading button{flex-shrink:0;background:#fff}
+.dataset-note-text{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.8;margin:10px 0 0;color:#4a5d76}
+.dataset-note:not(.dataset-note-detail) .dataset-note-text{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
+.dataset-note-empty{color:#93a0b3;font-size:13px;margin:8px 0 0}
+.dataset-note-detail{background:#fff;margin:0 0 24px;padding:22px 24px}
+.dataset-note-detail .dataset-note-text{max-height:280px;overflow-y:auto;overscroll-behavior:contain}
+.dataset-note-detail>.muted{display:block;margin-top:14px}
+.dataset-note-more{margin-top:10px;border:0;background:none;padding-left:0;color:#5368d8}
+.dataset-note-context{font-weight:600;overflow-wrap:anywhere}
+.dataset-note-context small{display:block;margin-top:8px;font-size:13px;font-weight:400;color:#8191a8;line-height:1.7}
+#dataset-note-text{min-height:220px;max-height:48dvh;resize:vertical;white-space:pre-wrap;line-height:1.8;overflow-wrap:anywhere}
+.dataset-note-meta{display:flex;justify-content:space-between;gap:12px;margin-top:10px}
+@media(max-width:600px){.dataset-note-detail{padding:16px}.dataset-note-meta{flex-wrap:wrap}.dataset-note-heading>span{gap:6px}}

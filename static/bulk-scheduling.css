@@ -1,0 +1,17 @@
+.scheduling-check{width:17px!important;height:17px!important;min-height:0!important;margin:0!important;flex:0 0 17px;accent-color:#5364da;cursor:pointer}
+.scheduling-check:disabled{cursor:not-allowed;opacity:.4}
+.scheduling-select-cell{width:38px;padding-right:6px!important}
+.scheduling-toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 14px;padding:14px 18px;background:#fff;border:1px solid #e0e7f4;border-radius:12px}
+.scheduling-toolbar span{font-size:14px}.scheduling-toolbar small{margin-left:auto;color:#8797b1}
+.scheduling-selection{border:1px solid #dce5f3;border-radius:12px;padding:14px 16px;margin:18px 0 22px}
+.scheduling-selection summary{cursor:pointer;font-weight:600;margin-bottom:12px}
+.scheduling-task-list{display:grid;gap:0}.scheduling-task-row{display:flex!important;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid #edf1f7;cursor:pointer}
+.scheduling-task-row:last-child{border:0}.scheduling-task-row>span:not(.badge){flex:1;min-width:0}.scheduling-task-row b{display:block;overflow-wrap:anywhere;font-size:14px}.scheduling-task-row small{display:block;color:#8a9bb5;font-weight:400;margin-top:4px}.scheduling-task-row .badge{flex-shrink:0}
+.scheduling-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+.scheduling-field{min-width:0;border:1px solid #e3e9f3;border-radius:12px;padding:16px;background:#f9faff}
+.scheduling-field.enabled{background:#fff;border-color:#adb9ee}.scheduling-field-toggle{display:flex!important;align-items:center;gap:9px!important;font-size:14px;font-weight:600;margin-bottom:10px;cursor:pointer}
+.scheduling-field input:not([type=checkbox]),.scheduling-field select{width:100%;min-width:0;font-size:14px}.scheduling-field small{display:block;color:#8698b2;font-size:12px;line-height:1.6;margin-top:8px}.scheduling-field input:disabled,.scheduling-field select:disabled{opacity:.5;cursor:not-allowed}
+.scheduling-servers{display:flex;flex-direction:column;gap:8px}.scheduling-servers label{margin:0;font-weight:400}.scheduling-servers span{overflow-wrap:anywhere}
+.scheduling-review{padding:14px 16px;background:#eef3ff;border-radius:10px;line-height:1.7;font-size:14px;margin:20px 0 12px;overflow-wrap:anywhere}
+.scheduling-field:has([data-scheduling-field=environment]){grid-column:1/-1}.scheduling-env-server{margin-top:14px;padding-top:12px;border-top:1px solid #e8edf5}.scheduling-env-server select{display:block;margin-top:6px}.scheduling-env-server button{margin-top:8px}.scheduling-field [hidden]{display:none!important}
+@media(max-width:620px){.scheduling-grid{grid-template-columns:minmax(0,1fr)}.scheduling-toolbar small{margin-left:0}.scheduling-task-row{gap:8px}}

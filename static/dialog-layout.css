@@ -1,0 +1,37 @@
+/* One bounded content scroll area; title and actions stay in the viewport. */
+html.dialog-open{overflow:hidden;scrollbar-gutter:stable}
+#dialog[open]{display:flex;flex-direction:column;position:fixed;inset:0;margin:auto;height:fit-content;width:min(850px,calc(var(--dialog-viewport-width,100vw) - 32px));max-width:calc(var(--dialog-viewport-width,100vw) - 32px);max-height:calc(var(--dialog-viewport-height,100dvh) - 32px);overflow:hidden;min-width:0;padding:0}
+#dialog[open]{inset:var(--dialog-inset-top,0px) var(--dialog-inset-right,0px) var(--dialog-inset-bottom,0px) var(--dialog-inset-left,0px)}
+#dialog .dialog-top{position:relative;top:auto;flex:0 0 auto;min-width:0;gap:14px;padding:17px 24px;z-index:4}
+#dialog .dialog-top h2{min-width:0;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.5}
+#dialog .dialog-top>button{flex-shrink:0;align-self:flex-start}
+#dialog-body{flex:1 1 auto;min-height:0;min-width:0;max-width:100%;overflow-y:auto;overflow-x:hidden;padding:22px 24px;overscroll-behavior:contain;scrollbar-gutter:stable;scroll-padding-block:18px;overflow-wrap:anywhere}
+#dialog-body>*,#dialog .form-grid>*{min-width:0}
+#dialog .form-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+#dialog input:not([type=checkbox]),#dialog select,#dialog textarea{max-width:100%;min-width:0}
+#dialog-body [data-dialog-docked]{display:none!important}
+#dialog-actions{flex:0 0 auto;display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:9px;border-top:1px solid #e3eaf4;background:#fff;padding:13px 24px;box-shadow:0 -4px 16px #253d5c05;max-height:calc(var(--dialog-viewport-height,100dvh) * .4);overflow-y:auto;min-width:0}
+#dialog-actions[hidden]{display:none!important}
+#dialog-actions button{max-width:100%;white-space:normal;overflow-wrap:anywhere;min-height:34px}
+#dialog-actions .dialog-action-summary,#dialog-actions .note-char-count{margin-right:auto;min-width:0;max-width:100%;font-size:10px;color:#8296b4;overflow-wrap:anywhere}
+#dialog-actions .note-char-count{max-width:45%;max-height:3.4em;overflow:auto;line-height:1.7}
+#dialog .batch-preview-scroll{max-height:none;overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;margin:16px 0}
+#dialog .batch-preview-scroll table{min-width:620px}
+#dialog .batch-preview-scroll td{overflow-wrap:anywhere}
+#dialog .file-list,#dialog .output-list,#dialog .notes-list{max-height:none;overflow:visible}
+#dialog .notes-list .note{min-width:0}
+#dialog .note-meta{flex-wrap:wrap}
+#dialog .info-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+#dialog .info-grid code,#dialog .hash-record code{overflow-wrap:anywhere;white-space:pre-wrap}
+#dialog .actions{flex-wrap:wrap}
+#dialog .note-doc-controls{flex-wrap:wrap}
+@media(max-width:700px){
+  #dialog[open]{width:calc(var(--dialog-viewport-width,100vw) - 16px);max-width:calc(var(--dialog-viewport-width,100vw) - 16px);max-height:calc(var(--dialog-viewport-height,100dvh) - 16px);border-radius:13px}
+  #dialog .dialog-top{padding:12px 15px;gap:10px}#dialog .dialog-top h2{font-size:15px}
+  #dialog-body{padding:17px 15px;scroll-padding-block:12px}
+  #dialog .form-grid,#dialog .info-grid{grid-template-columns:minmax(0,1fr)}
+  #dialog-actions{padding:10px 15px;gap:7px}#dialog-actions button{font-size:11px;padding:7px 10px}
+  #dialog-actions .dialog-action-summary{flex-basis:100%}
+  #dialog-actions .note-char-count{flex:1 1 100%;max-width:100%;font-size:9px}
+}
+@media(max-height:480px){#dialog .dialog-top{padding-block:9px}#dialog-body{padding-block:13px}#dialog-actions{padding-block:8px}#dialog-actions button{min-height:30px;padding-block:5px}}

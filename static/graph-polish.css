@@ -1,0 +1,32 @@
+/* A quiet canvas: status is an accent, while names remain high contrast. */
+.schedule-board.flow-board{border-radius:16px;box-shadow:0 8px 28px #253c5906}
+.flow-board .graph-scroll{background-color:#f7f9fc;background-image:radial-gradient(#c8d4e440 .7px,transparent .7px);background-size:18px 18px;max-height:660px;padding:14px 10px}
+.flow-board-header{gap:14px}.flow-board-header>div:first-child{min-width:180px}.flow-controls{gap:7px;flex-wrap:wrap;justify-content:flex-end}
+.flow-board .flow-node{--node-accent:#92a1b7;--node-tint:#f0f3f7}
+.schedule-board.flow-board .flow-node{background:#fff!important;border:1px solid #dce4ef!important;border-left:3px solid var(--node-accent)!important;border-radius:11px;padding:11px 13px 9px;box-shadow:0 3px 10px #29436a06}
+.flow-board .flow-node.complete{--node-accent:#2caa85;--node-tint:#eaf7f1}.flow-board .flow-node.running{--node-accent:#657ade;--node-tint:#edf0ff}.flow-board .flow-node.waiting{--node-accent:#c99b4b;--node-tint:#fcf5e8}.flow-board .flow-node.failed{--node-accent:#d1687c;--node-tint:#fff0f3}.flow-board .flow-node.canceled{--node-accent:#a1aabb}
+.flow-node-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px}
+.flow-sequence{font-size:9px;color:#96a6bc;letter-spacing:.4px;font-variant-numeric:tabular-nums}
+.flow-board .flow-status-text{display:flex;align-items:center;gap:5px;color:var(--node-accent);background:var(--node-tint);padding:3px 6px;border-radius:5px;font-size:9px;line-height:1.1}
+.flow-board .flow-status-dot{width:4px;height:4px;background:var(--node-accent)!important}
+.flow-board .flow-node-name{min-height:34px;flex:1;align-items:flex-start}
+.flow-board .flow-node .node-title{color:#344660!important;font-size:12px;line-height:17px;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;min-height:0;max-height:34px;font-weight:600}
+.flow-board .flow-node .node-title:hover{color:#536ad1!important}
+.flow-board .flow-node .node-footer{border-top:1px solid #f0f3f8;padding-top:6px;margin-top:7px;gap:8px;min-height:16px}
+.flow-location{color:#9caac0;font-size:8px;min-width:0;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+.flow-board .node-actions{gap:9px}.flow-board .flow-node .node-footer button{font-size:9px;min-height:15px;color:#8294b1}
+.flow-board .graph-edge,.flow-board .graph-edge.done{stroke:#b0bdce;stroke-width:1.1;opacity:.85}
+.flow-board.show-all-edges .graph-edge.secondary{stroke:#c2ccd9;opacity:.45;stroke-dasharray:3 4}
+.flow-board .graph-edge.secondary{opacity:0}.flow-board .graph-edge.error{stroke:#d18b99}
+.flow-board .highlighting .graph-edge{opacity:.1}.flow-board .highlighting .graph-edge.highlighted{stroke:#6a81c4;stroke-width:1.8;opacity:1;stroke-dasharray:none}
+.flow-board .highlighting .graph-node:not(.related){opacity:.45}.flow-board .flow-port{opacity:0!important}
+.flow-board .highlighting .flow-port.highlighted{opacity:1!important;background:#7d95ce;border-color:#7d95ce}
+.flow-board .flow-node:hover,.flow-board .flow-node:focus-within{box-shadow:0 5px 16px #36568b15;border-color:#aebfe0!important}
+.flow-board .schedule-zoom{white-space:nowrap}.flow-board .graph-fit-button.active{background:#edf2fd;color:#536dc2;border-color:#d8e2f6}
+.flow-overview{border-bottom:1px solid #e9edf5}.schedule-foot{background:#fff}
+.graph-component-picker{display:flex;align-items:center;gap:6px;font-size:10px;color:#8b9bb3;min-width:0}
+.graph-component-picker select{max-width:185px;min-height:33px;padding:5px 22px 5px 8px!important;font-size:10px!important;white-space:nowrap;text-overflow:ellipsis;background:#fff}
+.flow-board .flow-node .node-title{font-size:calc(12px * var(--graph-text-boost,1));line-height:calc(17px * var(--graph-text-boost,1));max-height:calc(34px * var(--graph-text-boost,1))}
+.flow-board .flow-status-text,.flow-sequence,.flow-board .flow-node .node-footer button{font-size:calc(9px * var(--graph-text-boost,1))}
+.flow-location{font-size:calc(8px * var(--graph-text-boost,1))}
+@media(max-width:700px){.flow-controls{justify-content:flex-start}.flow-board .graph-scroll{padding:12px 0}.flow-board-header>div:first-child{min-width:0}.flow-board .graph-fit-button{font-size:10px}}

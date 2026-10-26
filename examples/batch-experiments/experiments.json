@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "defaults": {
+    "level": "idle_only",
+    "priority": 50,
+    "memory_mb": 0,
+    "max_retries": 2,
+    "conda_env": "",
+    "datasets": []
+  },
+  "experiments": [
+    {
+      "key": "train",
+      "name": "训练示例",
+      "script": "train.sh",
+      "args": ["--epochs", "50"],
+      "files": ["params.json"],
+      "notes": "批量导入示例：请先替换脚本中的命令，并配置真实显存需求。"
+    },
+    {
+      "key": "evaluate",
+      "name": "评估示例",
+      "script": "evaluate.sh",
+      "depends_on": ["train"],
+      "priority": 60,
+      "notes": "训练成功且回传本机后才会调度；前序文件位置见 DEPENDENCIES_JSON。"
+    }
+  ]
+}
