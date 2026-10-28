@@ -228,6 +228,64 @@ def run_dir(spec):
     return safe_child(project, 'runs/' + attempt)
 
 
+def boot_identity():
+    """A changed Linux boot ID proves that every original process stopped."""
+    try:
+        boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        started=next(float(line.split()[1]) for line in Path('/proc/stat').read_text().splitlines() if line.startswith('btime '))
+        return {'boot_id':boot_id,'boot_started_at':started}
+    except (OSError,ValueError,StopIteration):
+        return {}
+
+
+def interruption_status(spec):
+    state=run_status(spec);ctrl=run_dir(spec)/'_control'
+    if state.get('interrupted'):
+        return {**state,'confirmed_stopped':True}
+    if state['state']=='finished':return {**state,'confirmed_stopped':False}
+    identity=json.loads((ctrl/'process.json').read_text()) if (ctrl/'process.json').is_file() else spec.get('known_process',{})
+    boot=boot_identity();old_id=identity.get('boot_id')
+    started=identity.get('started_at') or spec.get('known_started_at')
+    # Legacy runs have no boot ID. Both wall time and process start ticks must
+    # corroborate a reboot; a clock adjustment alone must never trigger a retry.
+    reboot=bool(old_id and boot.get('boot_id') and old_id!=boot['boot_id'])
+    if not old_id and boot.get('boot_started_at') and isinstance(started,(int,float)) and started>0 and started<boot['boot_started_at']-5:
+        try:
+            hz=os.sysconf('SC_CLK_TCK');uptime=float(Path('/proc/uptime').read_text().split()[0])
+            tokens=[int(identity[k]) for k in ('token','supervisor_token') if identity.get(k)]
+            reboot=bool(tokens) and all(token/hz>uptime+5 for token in tokens)
+        except (OSError,ValueError,KeyError):pass
+    return {**state,'confirmed_stopped':reboot,'interruption_cause':'server_reboot' if reboot else 'unconfirmed',
+            'recovery_evidence':{**boot,'previous_boot_id':old_id,'previous_started_at':started,'checked_at':time.time()}}
+
+
+def discard_failed_workspace(spec):
+    run=run_dir(spec);ctrl=run/'_control';state=run_status(spec)
+    if state['state']!='finished' or not (state.get('interrupted') or isinstance(state.get('exit_code'),int) and state['exit_code']!=0):
+        raise ValueError('仅已确认结束的失败／中断运行可清理，运行或未知状态不会删除')
+    workspace=run/'workspace'
+    if workspace.is_symlink():raise ValueError('工作目录为符号链接，拒绝清理')
+    removed=0;files=0
+    # Remove only this attempt's working copy. Shared content objects, code,
+    # other runs and control logs are never removed or made writable here.
+    with object_agent.index(project_path(spec)) as db:
+        if workspace.is_dir():
+            if workspace.resolve().parent!=run.resolve():raise ValueError('清理目录越界')
+            for current,dirs,names in os.walk(workspace,followlinks=False):
+                dirs[:]=[d for d in dirs if not (Path(current)/d).is_symlink()]
+                os.chmod(current,0o700)
+                for name in names:
+                    path=Path(current)/name
+                    if not path.is_symlink():removed+=path.stat().st_size;files+=1
+            shutil.rmtree(workspace)
+        prefix=str(workspace)+'/'
+        db.execute('DELETE FROM files WHERE substr(path,1,?)=?',(len(prefix),prefix))
+    receipt={'cleaned_at':time.time(),'removed_workspace_bytes':removed,'removed_files':files,'shared_objects_preserved':True}
+    previous=ctrl/'workspace-cleanup.json'
+    if not previous.exists():atomic(previous,receipt)
+    return json.loads(previous.read_text())
+
+
 def run_status(spec):
     run = run_dir(spec)
     ctrl = run / '_control'
@@ -237,6 +295,9 @@ def run_status(spec):
         return {'state': 'finished', **json.loads((ctrl/'exit.json').read_text())}
     if (ctrl / 'process.json').exists():
         value = json.loads((ctrl/'process.json').read_text())
+        boot=boot_identity()
+        if value.get('boot_id') and boot.get('boot_id') and value['boot_id']!=boot['boot_id']:
+            return {**value,'state':'lost'}
         alive = bool(value['supervisor_token']) and process_token(value['supervisor_pid']) == value['supervisor_token']
         child_alive = bool(value['token']) and process_token(value['pid']) == value['token']
         state=('paused' if value.get('paused') else 'running') if alive or child_alive else 'lost'
@@ -264,7 +325,7 @@ def supervise(spec_path):
             command = [conda_binary(spec), 'run', '--no-capture-output', *conda_target(spec['conda_env']), 'bash', '-c', spec['command']]
         with (ctrl/'run.log').open('ab', buffering=0) as log:
             proc = subprocess.Popen(command, cwd=str(cwd), env=env, stdout=log, stderr=log, start_new_session=True)
-            identity={'pid':proc.pid,'token':process_token(proc.pid),'supervisor_pid':os.getpid(),'supervisor_token':process_token(os.getpid()),'started_at':time.time(),'control_version':2,'paused':False,'subreaper':subreaper}
+            identity={'pid':proc.pid,'token':process_token(proc.pid),'supervisor_pid':os.getpid(),'supervisor_token':process_token(os.getpid()),'started_at':time.time(),'control_version':2,'paused':False,'subreaper':subreaper,**boot_identity()}
             atomic(ctrl/'process.json',identity)
             cancel_at=None;paused=False;terminated={}
             while True:
@@ -433,6 +494,18 @@ def dispatch(action, spec):
         return {'state': 'starting'}
     if action == 'status':
         return run_status(spec)
+    if action == 'interruption_status':
+        return interruption_status(spec)
+    if action == 'seal_interrupted':
+        result=interruption_status(spec)
+        if result['state']=='finished':return result
+        if not result['confirmed_stopped']:raise ValueError('未证明原实验已停止，禁止重新入队或清理')
+        ctrl=run_dir(spec)/'_control';ctrl.mkdir(parents=True,exist_ok=True)
+        atomic(ctrl/'exit.json',{'exit_code':None,'finished_at':result['recovery_evidence'].get('boot_started_at',time.time()),
+               'interrupted':True,'interruption_cause':result['interruption_cause'],'recovery_evidence':result['recovery_evidence']})
+        return run_status(spec)
+    if action == 'discard_failed_workspace':
+        return discard_failed_workspace(spec)
     if action in ('cancel','pause','resume'):
         return control_run(action,spec)
     if action == 'log':

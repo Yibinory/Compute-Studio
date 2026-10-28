@@ -20,7 +20,7 @@ from .environments import environment, signature as conda_signature, resolve as 
 from .transfer_journal import TransferJournal
 from .file_process import run as file_process
 
-DEFAULTS = {'id':'global', 'paused':False, 'poll_seconds':5, 'history_samples':6, 'stale_seconds':30, 'zero_memory_reservation_mb':1024, 'cleanup_check_seconds':3600,'content_store_enabled':True,'cache_scan_hours':24}
+DEFAULTS = {'id':'global', 'paused':False, 'poll_seconds':5, 'history_samples':6, 'stale_seconds':30, 'zero_memory_reservation_mb':1024, 'cleanup_check_seconds':3600,'content_store_enabled':True,'cache_scan_hours':24,'auto_requeue_interrupted':True,'interruption_retry_limit':2,'interruption_retry_delay':30}
 
 
 class Engine:
@@ -156,6 +156,10 @@ class Engine:
     def batch_state_action(self,task_ids,action,job=None):
         from .batch_states import apply
         return apply(self,task_ids,action,job)
+
+    def cleanup_failed_workspaces(self,job=None):
+        from .interruption_recovery import cleanup_failed_workspaces
+        return cleanup_failed_workspaces(self,job)
 
     def check_cancel(self,job):
         if self.stop_event.is_set():raise OperationCanceled('控制器正在关闭，停止后台操作')
@@ -426,7 +430,8 @@ class Engine:
                     raise ValueError('已成功任务请使用重试操作')
                 if task.get('attempt_id'):
                     task['previous_attempts']=task.get('previous_attempts',[])+[{'attempt_id':task['attempt_id'],'server_id':task.get('server_id'),'exit_code':task.get('exit_code'),'synced_at':task.get('synced_at'),'resolved_conda_env':task.get('resolved_conda_env'),'conda_env_source':task.get('conda_env_source')}]
-                task.update(status='queued', reason='', synced_at=None, server_id=None, attempt_id=None, cancel_requested=False, canceled=False, attempts=0)
+                task.update(status='queued', reason='', synced_at=None, server_id=None, attempt_id=None, cancel_requested=False, canceled=False, attempts=0,interruption_retries=0)
+                for field in ('interruption','workspace_cleanup','recovery_check_after','interruption_was_suspended'):task.pop(field,None)
                 task.pop('resolved_conda_env',None);task.pop('conda_env_source',None)
                 for field in ('control_request','control_request_id','control_requested_at','paused_at'):task.pop(field,None)
                 task.update(exit_code=None,gpu_uuid=None,gpu_index=None,started_at=None,finished_at=None,remote_state={})
@@ -834,6 +839,11 @@ class Engine:
                     self.finish(task)
                 return
             result = self.remote(server).call('status',self.spec(task))
+            if result.get('interrupted') or result['state'] in ('lost','absent') and task['status']!='staging':
+                from .interruption_recovery import recover
+                if task['status']=='suspended':task['interruption_was_suspended']=True
+                recover(self,task,self.remote(server))
+                return
             if result['state']=='finished':
                 task.update(status='syncing',exit_code=result['exit_code'],remote_finished_at=result.get('finished_at'),reason='实验结束，正在回传全部运行文件',canceled=result.get('canceled',False))
                 self.put_runtime_task(task)
@@ -915,7 +925,7 @@ class Engine:
                 task['status']='canceled'
             elif code==0:
                 task['status']='success'
-            elif oom and task['attempts'] <= task['max_retries']:
+            elif oom and task['attempts']-task.get('interruption_retries',0) <= task['max_retries']:
                 task['retry_snapshot_attempt']=task['attempt_id']
                 task.update(status='waiting',memory_mb=max(task['memory_mb']+1024,int(task['memory_mb']*1.25)),reason='检测到 OOM/异常退出，已提高显存需求并保留本次结果；有界重试')
                 task['previous_attempts'] = task.get('previous_attempts',[])+[{'attempt_id':task['attempt_id'],'server_id':task['server_id'],'exit_code':code,'synced_at':task['synced_at'],'resolved_conda_env':task.get('resolved_conda_env'),'conda_env_source':task.get('conda_env_source')}]

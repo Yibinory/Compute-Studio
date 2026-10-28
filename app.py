@@ -627,16 +627,23 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
         if not isinstance(data,dict):raise ValueError('请提交有效的设置对象')
         with engine.store.lock:
             updated=dict(engine.settings)
-            for field,low,high in [('poll_seconds',2,300),('history_samples',1,120),('stale_seconds',5,600),('zero_memory_reservation_mb',1,100000),('cleanup_check_seconds',60,86400),('cache_scan_hours',1,8760)]:
+            for field,low,high in [('poll_seconds',2,300),('history_samples',1,120),('stale_seconds',5,600),('zero_memory_reservation_mb',1,100000),('cleanup_check_seconds',60,86400),('cache_scan_hours',1,8760),('interruption_retry_limit',0,20),('interruption_retry_delay',0,3600)]:
                 if field in data:
                     updated[field]=engine.numeric(data[field],low,high,True)
             if 'paused' in data:
                 if not isinstance(data['paused'],bool):raise ValueError('暂停调度必须为布尔值')
                 updated['paused']=data['paused']
+            if 'auto_requeue_interrupted' in data:
+                if not isinstance(data['auto_requeue_interrupted'],bool):raise ValueError('异常自动入队必须为布尔值')
+                updated['auto_requeue_interrupted']=data['auto_requeue_interrupted']
             engine.store.put('settings',updated)
             engine.settings=updated
             engine.wake_event.set()
         return jsonify(engine.settings)
+
+    @app.post('/api/tasks/failed-workspaces/cleanup')
+    def failed_workspace_cleanup():
+        return jsonify(engine.enqueue('清理已结束的失败运行副本',engine.cleanup_failed_workspaces))
 
     def scope_root(project_id,task_id=None,editing=False):
         project=engine.local_project(project_id)

@@ -1,0 +1,15 @@
+const assert=require('assert');
+const {taskDuration,formatTaskDuration}=require('../static/task-duration.js');
+const task={status:'running',started_at:100,attempt_id:'run'};
+assert.strictEqual(taskDuration(task,165).text,'已运行 1分 5秒');
+assert.strictEqual(taskDuration(task,166).seconds,66);
+assert.strictEqual(taskDuration({...task,status:'success',remote_finished_at:160,finished_at:260,synced_at:300},1000).seconds,60);
+assert.strictEqual(taskDuration({...task,status:'syncing',remote_finished_at:160},1000).seconds,60);
+assert.strictEqual(taskDuration({...task,status:'suspended'},165).text,'已历时 1分 5秒');
+assert.strictEqual(taskDuration({...task,status:'lost'},1000).text,'时长待核实');
+assert.strictEqual(taskDuration({...task,status:'waiting',attempt_id:null},1000).text,'未开始');
+assert.strictEqual(taskDuration({...task,status:'failed',finished_at:120},1000).seconds,20);
+assert.strictEqual(taskDuration({...task,started_at:200},100).seconds,0);
+assert.strictEqual(taskDuration({...task,started_at:null},100).text,'未开始');
+assert.strictEqual(formatTaskDuration(90061),'1天 1小时 1分 1秒');
+console.log('Task durations: live ticking, frozen execution end, transfer exclusion, suspension, retry reset and unknown states passed.');

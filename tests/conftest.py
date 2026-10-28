@@ -130,6 +130,20 @@ class FakeRemote(Remote):
         status=ctrl/'status.json'
         if action=='status':
             return json.loads(status.read_text()) if status.exists() else {'state':'absent'}
+        if action=='interruption_status':
+            value=json.loads(status.read_text()) if status.exists() else {'state':'absent'}
+            return {**value,'confirmed_stopped':bool(value.get('confirmed_stopped') or value.get('interrupted'))}
+        if action=='seal_interrupted':
+            value=json.loads(status.read_text())
+            if not value.get('confirmed_stopped') and not value.get('interrupted'):raise ValueError('not confirmed stopped')
+            value.update(state='finished',interrupted=True,exit_code=None)
+            status.write_text(json.dumps(value));(ctrl/'exit.json').write_text(json.dumps(value));return value
+        if action=='discard_failed_workspace':
+            value=json.loads(status.read_text())
+            if value['state']!='finished' or not (value.get('interrupted') or value.get('exit_code')):raise ValueError('not a failed completed run')
+            workspace=run/'workspace';size=sum(p.stat().st_size for p in workspace.rglob('*') if p.is_file()) if workspace.is_dir() else 0
+            if workspace.is_dir():shutil.rmtree(workspace)
+            return {'cleaned_at':time.time(),'removed_workspace_bytes':size,'shared_objects_preserved':True}
         if action=='launch':
             if status.exists():return json.loads(status.read_text())
             ctrl.mkdir(parents=True,exist_ok=True)

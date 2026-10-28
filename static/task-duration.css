@@ -1,0 +1,5 @@
+.task-duration{font-variant-numeric:tabular-nums;white-space:nowrap;font-size:11px;line-height:1.5;color:#73849d;display:inline-block}
+.flow-board .flow-node-duration{margin-top:4px;min-height:16px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis}
+.flow-board .flow-node-duration .task-duration{font-size:calc(9px * var(--graph-text-boost,1));color:#8191a9;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:top}
+.flow-board .flow-node.running .task-duration{color:#6275c5}
+.task-list-table td[data-column=status]>.task-duration{display:block;margin-top:5px}
