@@ -1,12 +1,60 @@
 import json
 import threading
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
 
 from test_api import client,login,archive
 from test_transfers import wait_job
+from scheduler.files import extract_zip, manifest
+
+
+def test_zip64_above_old_count_limit_passes_preflight(tmp_path, monkeypatch):
+    monkeypatch.delenv('COMPUTE_ZIP_MAX_ENTRIES', raising=False)
+    source=tmp_path/'large.zip'
+    with zipfile.ZipFile(source,'w',allowZip64=True) as output:
+        for index in range(200001):
+            output.writestr(f'{index}.txt', b'')
+
+    class PreflightComplete(Exception):
+        pass
+
+    def first_write(done,total,path,index,count):
+        assert done==index==0 and count==200001
+        raise PreflightComplete()
+
+    with pytest.raises(PreflightComplete):
+        extract_zip(source,tmp_path/'stage',progress=first_write)
+    assert not (tmp_path/'stage').exists()
+
+
+def test_retry_same_staged_zip_after_entry_limit(client, monkeypatch):
+    c,app=client
+    h=login(c,app);engine=app.extensions['engine']
+    raw=archive({'sub/a.txt':'one','sub/b.txt':'two','.git/metadata':'ignored'}).getvalue()
+    u=c.post('/api/uploads',json={'kind':'dataset','name':'large_zip','mode':'zip',
+             'files':[{'path':'data.zip','size':len(raw)}]},headers=h).get_json()
+    url='/api/uploads/'+u['id']
+    assert c.put(url+'/files/0?offset=0',data=raw,headers=h).status_code==200
+    monkeypatch.setenv('COMPUTE_ZIP_MAX_ENTRIES','2')
+    failed=wait_job(engine,c.post(url+'/finish',json={},headers=h).json['job_id'])
+    assert failed['status']=='failed' and '3 个条目' in failed['error']
+    assert (engine.uploads.base(u)/'payload'/'0').stat().st_size==len(raw)
+    monkeypatch.setenv('COMPUTE_ZIP_MAX_ENTRIES','3')
+    success=wait_job(engine,c.post(url+'/finish',json={},headers=h).json['job_id'])
+    assert success['status']=='success'
+    directory=engine.root/'datasets'/u['dataset_id']/'files'
+    assert engine.store.get('datasets',u['dataset_id'])['manifest']==manifest(directory)
+    assert set(manifest(directory))=={'sub/a.txt','sub/b.txt'}
+    assert (directory/'.git'/'metadata').is_file()
+
+
+def test_zip_merge_preserves_existing_inventory(tmp_path):
+    (tmp_path/'old.txt').write_bytes(b'keep')
+    inventory=extract_zip(archive({'nested/empty.txt':''}),tmp_path)
+    assert inventory==manifest(tmp_path) and len(inventory)==2
 
 
 def test_many_file_receipts_are_not_rewritten_in_each_chunk(client,monkeypatch):

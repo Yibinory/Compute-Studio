@@ -12,7 +12,7 @@ import threading
 import time
 from pathlib import Path
 
-from .files import confined, extract_zip, manifest, relative, digest
+from .files import confined, confined_under, extract_zip, manifest, relative, digest
 
 
 def run(root, action, update=None, check=None, **options):
@@ -58,8 +58,15 @@ def run(root, action, update=None, check=None, **options):
 
 def work(spec):
     scratch=Path(spec['scratch']);last=[0,None]
-    def check():
-        if (scratch/'stop').exists():raise ValueError('文件处理已停止')
+    stop_file=scratch/'stop'
+    stop_interval=.05 if spec['action'] in ('copy','publish','zip','prepare') else 0
+    next_stop_check=0
+    def check(force=False):
+        nonlocal next_stop_check
+        now=time.monotonic()
+        if force or now>=next_stop_check:
+            if stop_file.exists():raise ValueError('文件处理已停止')
+            next_stop_check=now+stop_interval
     def emit(kind,**data):
         print(json.dumps(dict(type=kind,**data),ensure_ascii=False),flush=True)
     def progress(phase):
@@ -141,19 +148,21 @@ def work(spec):
         if stage.exists():shutil.rmtree(stage)
         stage.mkdir(parents=True)
     if action=='copy':
+        stage=stage.resolve()
         source=Path(spec['source']);entries=[]
         if spec['mode']=='zip':entries=[(source.name,source,source.stat())]
         else:
             for current,dirs,files in os.walk(source,followlinks=False):
                 check()
                 dirs[:]=[d for d in dirs if d not in ('.git','.venv','__pycache__','node_modules')]
-                for item in dirs+files:
+                for item in dirs:
                     if (Path(current)/item).is_symlink():raise ValueError('不支持符号链接：'+str(Path(current)/item))
                 for item in files:
-                    p=Path(current)/item;info=p.stat()
+                    p=Path(current)/item;info=p.lstat()
+                    if stat.S_ISLNK(info.st_mode):raise ValueError('不支持符号链接：'+str(p))
                     if not stat.S_ISREG(info.st_mode):raise ValueError('来源含特殊文件：'+str(p))
                     entries.append((relative(p.relative_to(source).as_posix()),p,info))
-                    if len(entries)>200000:raise ValueError('文件数量超过 200000')
+                    if len(entries)>200000:raise ValueError('直接导入文件夹最多支持 200,000 个文件，更大目录请打包为 ZIP 后导入')
                     progress('scanning')(0,0,entries[-1][0],len(entries),0)
         if not entries:raise ValueError('来源文件夹为空或已被移除')
         total=sum(info.st_size for _,_,info in entries)
@@ -165,8 +174,9 @@ def work(spec):
         result={};done=0
         for index,(rel,p,before) in enumerate(entries):
             check()
-            target=Path(spec['payload'])/'0' if spec['mode']=='zip' else confined(stage,rel)
-            target.parent.mkdir(parents=True,exist_ok=True);h=hashlib.sha256();start=done
+            target=Path(spec['payload'])/'0' if spec['mode']=='zip' else confined_under(stage,rel)
+            if target.parent!=stage:target.parent.mkdir(parents=True,exist_ok=True)
+            h=hashlib.sha256();start=done
             with p.open('rb') as inp,target.open('wb') as out:
                 for block in iter(lambda:inp.read(1024**2),b''):
                     out.write(block);h.update(block);done+=len(block)
@@ -175,10 +185,11 @@ def work(spec):
             if (before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=(after.st_size,after.st_mtime_ns,after.st_ctime_ns):raise ValueError('导入期间来源文件变化：'+rel)
             result[rel]={'size':before.st_size,'sha256':h.hexdigest()}
             progress('copying')(done,total,rel,index+1,len(entries))
+        check(force=True)
         emit('progress',phase='copying',bytes=done,total=total,files_done=len(entries),files_total=len(entries),path=entries[-1][0])
         return result
     if action=='prepare':
-        if spec['mode']=='zip':return extract_zip(Path(spec['payload'])/'0',stage,limit=spec['limit'],progress=progress('extracting'),hash_progress=progress('hashing'))
+        if spec['mode']=='zip':return extract_zip(Path(spec['payload'])/'0',stage,limit=spec['limit'],progress=progress('extracting'),hash_progress=progress('hashing'),scan_progress=progress('scanning'))
         entries=spec['files']
         for index,item in enumerate(entries):
             dest=confined(stage,item['path']);dest.parent.mkdir(parents=True,exist_ok=True)
@@ -192,22 +203,29 @@ def work(spec):
                             out.write(block);progress('extracting')(out.tell(),item['size'],item['path'],index,len(entries))
             progress('extracting')(0,0,item['path'],index+1,len(entries))
         return manifest(stage,progress=progress('hashing'))
-    if action=='zip':return extract_zip(spec['archive'],stage,limit=spec['limit'],progress=progress('extracting'),hash_progress=progress('hashing'))
+    if action=='zip':return extract_zip(spec['archive'],stage,limit=spec['limit'],progress=progress('extracting'),hash_progress=progress('hashing'),scan_progress=progress('scanning'))
     if action=='publish':
-        inventory=spec['inventory'];before=spec['before'];target=Path(spec['target']);backup=Path(spec['backup']);published=[];done=0;total=sum(v['size'] for v in inventory.values())
+        inventory=spec['inventory'];before=spec['before'];target=Path(spec['target']).resolve();backup=Path(spec['backup']);published=[];done=0;total=sum(v['size'] for v in inventory.values())
+        stage=stage.resolve()
+        if inventory:target.mkdir(parents=True,exist_ok=True)
         try:
             for index,(rel,item) in enumerate(inventory.items()):
                 if before.get(rel,{}).get('sha256')!=item['sha256']:
-                    dest=confined(target,rel);keep=confined(backup,rel)
+                    dest=confined_under(target,rel)
+                    keep=None
                     if dest.exists():
                         if not dest.is_file():raise ValueError('目标包含同名目录：'+rel)
+                        keep=confined(backup,rel)
                         keep.parent.mkdir(parents=True,exist_ok=True);os.replace(dest,keep)
-                    published.append((dest,keep));dest.parent.mkdir(parents=True,exist_ok=True);os.replace(confined(stage,rel),dest)
+                    published.append((dest,keep))
+                    if dest.parent!=target:dest.parent.mkdir(parents=True,exist_ok=True)
+                    os.replace(confined_under(stage,rel),dest)
                 done+=item['size'];progress('publishing')(done,total,rel,index+1,len(inventory))
+            check(force=True)
         except Exception:
             for dest,keep in reversed(published):
                 if dest.is_file():dest.unlink()
-                if keep.exists():os.replace(keep,dest)
+                if keep is not None:os.replace(keep,dest)
             raise
         return {}
     raise ValueError('未知文件处理操作')

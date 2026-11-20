@@ -10,11 +10,16 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 
+ZIP_MAX_ENTRIES = 2_000_000
+EXCLUDED_DIRS = frozenset(('.git', '__pycache__', '.venv', 'node_modules'))
+RESERVED_NAMES = {'CON', 'PRN', 'AUX', 'NUL', *('COM'+str(i) for i in range(1,10)), *('LPT'+str(i) for i in range(1,10))}
+
+
 def name(value):
     value = str(value).strip()
     if not re.fullmatch(r'[\w.-]{1,100}', value, re.UNICODE) or value in ('.', '..') or value.endswith('.'):
         raise ValueError('名称只能包含文字、数字、下划线、短横线和点（1–100 字符）')
-    if value.split('.')[0].upper() in {'CON', 'PRN', 'AUX', 'NUL', *('COM'+str(i) for i in range(1,10)), *('LPT'+str(i) for i in range(1,10))}:
+    if value.split('.')[0].upper() in RESERVED_NAMES:
         raise ValueError('名称是系统保留字')
     return value
 
@@ -24,13 +29,17 @@ def relative(value):
     path = PurePosixPath(value)
     if not value or re.search(r'[\\<>:"|?*\x00-\x1f]',value) or path.is_absolute() or any(p in ('..', '') for p in path.parts):
         raise ValueError('文件路径必须是安全的相对路径')
-    if any(p.endswith((' ', '.')) or p.split('.')[0].upper() in {'CON','PRN','AUX','NUL', *('COM'+str(i) for i in range(1,10)), *('LPT'+str(i) for i in range(1,10))} for p in path.parts):
+    if any(p.endswith((' ', '.')) or p.split('.')[0].upper() in RESERVED_NAMES for p in path.parts):
         raise ValueError('文件路径包含系统保留名称')
     return path.as_posix()
 
 
 def confined(root, rel):
-    root = Path(root).resolve()
+    return confined_under(Path(root).resolve(), rel)
+
+
+def confined_under(root, rel):
+    """Validate a child against an already resolved absolute root."""
     target = root / relative(rel)
     if root not in target.resolve().parents:
         raise ValueError('路径越界')
@@ -63,7 +72,7 @@ def manifest(root, progress=None, check=None):
     entries=[]
     for base, dirs, files in os.walk(root, followlinks=False):
         if check:check()
-        dirs[:] = sorted(d for d in dirs if d not in ('.git', '__pycache__', '.venv', 'node_modules'))
+        dirs[:] = sorted(d for d in dirs if d not in EXCLUDED_DIRS)
         for item in dirs + files:
             p = Path(base) / item
             confined(root,p.relative_to(root).as_posix())
@@ -131,16 +140,34 @@ def copy_tree(source, target, check=None):
         finally:temporary.unlink(missing_ok=True)
 
 
-def extract_zip(archive, target, limit=50 * 1024**3, progress=None, hash_progress=None):
+def extract_zip(archive, target, limit=50 * 1024**3, progress=None, hash_progress=None, scan_progress=None):
     """Validate the entire archive before writing; reject symlinks and collisions."""
+    max_entries = int(os.environ.get('COMPUTE_ZIP_MAX_ENTRIES', ZIP_MAX_ENTRIES))
+    if max_entries < 1:
+        raise ValueError('COMPUTE_ZIP_MAX_ENTRIES 必须为正整数')
+    root = Path(target).resolve()
+    fresh = True
+    if root.exists():
+        with os.scandir(root) as existing:
+            fresh = next(existing, None) is None
+    inventory = {}
+    if scan_progress:
+        scan_progress(0, 0, '', 0, 0)
     with zipfile.ZipFile(archive) as z:
-        entries, total, seen = [], 0, set()
-        if len(z.infolist()) > 200000:
-            raise ValueError('ZIP 文件数量过多')
-        for info in z.infolist():
+        entries = z.infolist()
+        count = len(entries)
+        if count > max_entries:
+            raise ValueError(f'ZIP 含 {count:,} 个条目，超过当前上限 {max_entries:,}。'
+                             '可调整控制器的 COMPUTE_ZIP_MAX_ENTRIES 后继续处理原上传。')
+        total, seen = 0, set()
+        for index, info in enumerate(entries):
+            if scan_progress and index % 512 == 0:
+                scan_progress(0, 0, '', index, count)
             # ZipInfo.filename normalizes backslashes on Windows; validate the
             # unmodified archive name before any normalization takes place.
             rel = relative(info.orig_filename.rstrip('/'))
+            if rel == '.':
+                raise ValueError('ZIP 条目路径无效')
             key = rel.casefold()
             if key in seen:
                 raise ValueError('ZIP 含重复或大小写冲突文件')
@@ -151,23 +178,43 @@ def extract_zip(archive, target, limit=50 * 1024**3, progress=None, hash_progres
             total += info.file_size
             if total > limit:
                 raise ValueError('解压后文件超过限制')
-            entries.append((info, confined(target, rel)))
-        space=Path(target)
+            if not fresh:
+                confined_under(root, rel)
+        del seen
+        space=root
         while not space.exists():space=space.parent
         if shutil.disk_usage(space).free<total+64*1024**2:raise ValueError('本机保存目录空间不足以解压此文件')
         done=0
         if progress:
             progress(0,total,'',0,len(entries))
-        for index,(info, dest) in enumerate(entries):
+        for index,info in enumerate(entries):
+            rel = relative(info.orig_filename.rstrip('/'))
+            dest = confined_under(root, rel)
             if info.is_dir():
                 dest.mkdir(parents=True, exist_ok=True)
             else:
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                with z.open(info) as source, dest.open('wb') as out:
+                checksum = hashlib.sha256() if fresh else None
+                start = done
+                with z.open(info) as source, dest.open('xb' if fresh else 'wb') as out:
                     for block in iter(lambda:source.read(1024*1024),b''):
                         out.write(block);done+=len(block)
+                        if checksum is not None:
+                            checksum.update(block)
                         if progress:
                             progress(done,total,info.filename,index,len(entries))
+                if done - start != info.file_size:
+                    raise ValueError('ZIP 条目解压大小与清单不符：' + rel)
+                if checksum is not None:
+                    # Windows can reuse an earlier directory with different casing.
+                    actual = dest.resolve(strict=True).relative_to(root) if os.name == 'nt' else PurePosixPath(rel)
+                    if not EXCLUDED_DIRS.intersection(actual.parts[:-1]):
+                        inventory[actual.as_posix()] = {'sha256': checksum.hexdigest(), 'size': info.file_size}
             if progress:
                 progress(done,total,info.filename,index+1,len(entries))
-    return manifest(target,progress=hash_progress)
+    if not fresh:
+        return manifest(root,progress=hash_progress)
+    if hash_progress:
+        hashed = sum(item['size'] for item in inventory.values())
+        hash_progress(hashed, hashed, '', len(inventory), len(inventory))
+    return inventory

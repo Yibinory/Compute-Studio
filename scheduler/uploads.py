@@ -57,7 +57,7 @@ class Uploads:
                 raise ValueError('未知上传模式')
             raw=data.get('files',[])
             if not isinstance(raw,list) or not raw or len(raw)>200000:
-                raise ValueError('请选择文件，最多 200000 个')
+                raise ValueError('请选择 1–200,000 个文件。更多文件可打包为 ZIP 后导入')
             if mode=='zip' and len(raw)!=1:
                 raise ValueError('ZIP 模式一次导入一个压缩包')
             files=[];seen=set()
@@ -281,7 +281,12 @@ class Uploads:
                     raise ValueError('导入内容为空')
                 upload=self.engine.store.get('uploads',upload_id)
                 target=self.engine.root/'datasets'/upload['dataset_id']/'files' if upload['kind']=='dataset' else self.scope(upload['project_id'],upload.get('task_id'))
-                before=self.file_work('existing',progress,job,path=str(target),paths=list(inventory)) if target.exists() else {}
+                before={}
+                if target.is_dir():
+                    with os.scandir(target) as entries:
+                        has_existing_files=next(entries,None) is not None
+                    if has_existing_files:
+                        before=self.file_work('existing',progress,job,path=str(target),paths=list(inventory))
                 local_server={'id':'local','name':'\u672c\u673a\u4fdd\u5b58\u76ee\u5f55'}
                 self.engine.transfers.prepare(job,[local_server],inventory)
                 self.engine.transfers.plan(job,[local_server],inventory,before,local_server)
