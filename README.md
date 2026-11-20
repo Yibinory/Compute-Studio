@@ -124,6 +124,35 @@ data/access-token.txt
 
 ## 批量创建实验
 
+### 由 AI 直接导入
+
+控制器运行后，可以直接告诉本机的 Codex “把这个目录里的实验导入视觉表征学习项目，先存为草稿”。项目自带 Python 命令行客户端，AI 可用同一工作空间的访问权限执行操作。网页中可以继续查看进度、编辑草稿和手动导入。
+
+在仓库根目录运行以下命令。将示例项目名换成自己的已有项目名或 ID。
+
+```powershell
+python studio_cli.py projects
+python studio_cli.py import-experiments --project "视觉表征学习" "./examples/batch-experiments"
+python studio_cli.py tasks --project "视觉表征学习"
+```
+
+| 操作 | 命令 |
+| --- | --- |
+| 新建项目 | `create-project 项目名` |
+| 只预览实验与依赖 | `import-experiments --preview-only --project 项目名 本机目录` |
+| 确认已有预览 | `commit 批次ID --revision 修订号` |
+| 导入公共代码或 ZIP | `import-code --project 项目名 路径` |
+| 导入实验专属文件 | `import-code --project 项目名 --task 实验ID 路径` |
+| 导入数据集并按现有设置同步 | `import-dataset --name 数据集名 路径` |
+| 跟踪后台作业 | `job 作业ID --wait 300` |
+| 将实验入队、查看近期日志 | `queue 实验ID`、`log 实验ID` |
+
+表中命令均跟在 `python studio_cli.py` 后。客户端只使用 Python 标准库，默认连接本机 8776 端口并自动读取工作空间令牌。使用演示数据时，在子命令前加 `--demo`。控制器以自定义保存目录或端口启动时，在子命令前传入对应的 `--data-dir` 或 `--port`。
+
+导入命令等待后台完成后向标准输出返回 UTF-8 JSON，标准错误流提供作业 ID。每阶段默认等待 300 秒，可用 `--wait 秒数` 调整。等待超时后，先查询原作业；预览作业完成后可用结果中的 `batch_id` 和 `configuration_revision` 继续提交。同一批次可重复确认。重新扫描同一目录会创建独立批次。
+
+### 通过网页导入
+
 在同一目录准备脚本、配置文件与任务专属输入，再在项目内点击 **批量导入实验**，提供控制器本机的目录地址。工具会后台读取配置，先预览，再一次创建草稿。导入时可以统一覆盖执行环境、调度级别和服务器范围。
 
 仓库内提供一个可直接导入的通用示例：

@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ROOT_FILES = ('app.py', 'requirements.txt', 'requirements-dev.txt', 'README.md',
+ROOT_FILES = ('app.py', 'studio_cli.py', 'AGENTS.md', 'requirements.txt', 'requirements-dev.txt', 'README.md',
               '.gitignore', '.gitattributes', 'CONTRIBUTING.md', 'THIRD_PARTY_NOTICES.md',
               'start_web.bat', 'start_demo.bat')
 CODE_DIRS = {'scheduler': {'.py'}, 'templates': {'.html'}, 'tests': {'.py', '.js'},
