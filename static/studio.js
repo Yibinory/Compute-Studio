@@ -1,17 +1,37 @@
 'use strict';
-const studioBaseOverview=overview,studioBaseProjects=projectsPage;
 toast=function(message,error=false){
   const root=$('#toasts');if(!root)return;
   for(const old of root.children)if(old.textContent===message)old.remove();
   while(root.children.length>=2)root.firstElementChild.remove();
   const el=document.createElement('div');el.className='toast'+(error?' error':'');el.textContent=message;root.append(el);setTimeout(()=>el.remove(),error?12000:4500);
 };
-overview=function(){
-  const servers=state.servers||[],online=servers.filter(s=>s.connected).length,projects=state.projects||[];
-  const hero=`<section class="studio-hero"><div class="studio-hero-copy"><span class="studio-kicker">${state.settings.demo?'演示工作空间':'研究工作空间'} <i></i> COMPUTE STUDIO</span><h2>把实验的每一步，连接起来。</h2><p>${online} 台服务器已连接 · ${projects.length} 个项目空间<br>代码跟随算力，结果回到项目。</p><div class="studio-hero-links"><a href="#projects">进入项目空间 <span>↗</span></a><a href="#benchmarks">了解 GPU 算力 <span>↗</span></a></div></div><div class="studio-hero-art"><div class="studio-orbit"></div><img src="/static/assets/compute-studio-logo.png" alt="" width="140" height="140"><span>CONNECTED COMPUTE</span></div></section>`;
-  return studioBaseOverview().replace('<div class="stats">',hero+'<div class="stats">');
-};
-projectsPage=function(projects){return studioBaseProjects(projects).replace('<div class="grid">','<div class="grid projects-grid">');};
+function memoryOverview(gpus) {
+  let used = 0, total = 0, samples = 0;
+  for (const gpu of gpus) {
+    const capacity = gpu.memory_total_mb, usage = gpu.memory_used_mb;
+    if (!Number.isFinite(capacity) || !Number.isFinite(usage) || capacity <= 0 || usage < 0 || usage > capacity) continue;
+    used += usage;
+    total += capacity;
+    samples++;
+  }
+  const percent = samples ? Math.round(100 * used / total) : 0;
+  const gib = mb => (mb / 1024).toLocaleString('zh-CN', { maximumFractionDigits: 1 });
+  const detail = samples
+    ? `共 ${gib(total)} GiB · 剩余 ${gib(total - used)} GiB · 已采样 ${samples} / ${gpus.length} 张卡`
+    : '等待在线服务器上报显存采样';
+  return `<section class="studio-hero" aria-labelledby="pool-heading">
+    <div class="pool-summary">
+      <h2 id="pool-heading">GPU 显存占用</h2>
+      <p class="pool-value">${samples ? gib(used) : '—'} <small>GiB</small></p>
+      <p class="pool-detail">${detail}</p>
+      <div class="pool-links"><a href="#projects">项目空间 <span aria-hidden="true">↗</span></a>
+      <a href="#benchmarks">GPU 性能测试 <span aria-hidden="true">↗</span></a></div>
+    </div>
+    <div class="pool-visual"><div class="pool-ring" style="--used:${percent}%">
+      <div><strong>${samples ? percent + '<small>%</small>' : '—'}</strong><span>显存占用率</span></div>
+    </div></div>
+  </section>`;
+}
 const studioIcons={
  overview:'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',
  projects:'M3 7V5a2 2 0 0 1 2-2h5l3 3h6a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
@@ -23,4 +43,10 @@ const studioIcons={
  settings:'M4 6h16 M4 12h16 M4 18h16 M8 3v6 M16 9v6 M10 15v6',
  events:'M8 5h13 M8 12h13 M8 19h13 M3 5h1 M3 12h1 M3 19h1'
 };
-document.querySelectorAll('[data-nav]').forEach(el=>{const d=studioIcons[el.dataset.nav];if(!d)return;const text=el.querySelector('span');el.innerHTML=`<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg>${text.outerHTML}`;});
+function studioIcon(name, className) {
+  return `<svg class="${className}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${studioIcons[name]}"/></svg>`;
+}
+document.querySelectorAll('[data-nav]').forEach(link => {
+  link.insertAdjacentHTML('afterbegin', studioIcon(link.dataset.nav, 'nav-icon'));
+});
+$('.skip-content')?.addEventListener('click', () => $('#main').focus());

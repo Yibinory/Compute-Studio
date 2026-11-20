@@ -8,7 +8,14 @@ function taskFilterApply(tasks){if(!taskFilterScope())return tasks;const f=taskF
 const taskFilterBaseTable=tasksTable;
 tasksTable=function(tasks,compact=false){
  if(compact||!taskFilterScope())return taskFilterBaseTable(tasks,compact);
- const f=taskFilterDraft(),visible=taskFilterApply(tasks),option=(v,l)=>`<option value="${v}" ${f.status===v?'selected':''}>${l} · ${tasks.filter(t=>(taskFilterGroups[v]||[v]).includes(t.status)).length}</option>`;
+ const f=taskFilterDraft(),visible=taskFilterApply(tasks);
+ const counts=new Map();
+ for(const task of tasks)counts.set(task.status,(counts.get(task.status)||0)+1);
+ function option(value,label){
+   const states=taskFilterGroups[value]||[value];
+   const count=states.reduce((sum,status)=>sum+(counts.get(status)||0),0);
+   return `<option value="${value}" ${f.status===value?'selected':''}>${label} · ${count}</option>`;
+ }
  const filters=`<section class="task-list-filters" aria-label="实验列表筛选"><label>实验状态<select data-task-filter="status"><option value="">全部状态 · ${tasks.length}</option>${[['pending','未开始'],['active','执行与回传中'],['attention','需处理'],['ended','已结束']].map(([v,l])=>option(v,l)).join('')}<optgroup label="具体状态">${taskFilterStates.map(v=>option(v,labels[v]||({'suspended':'运行暂停'})[v]||v)).join('')}</optgroup></select></label>${route()[0]==='tasks'?`<label>项目<select data-task-filter="project"><option value="">全部项目</option>${state.projects.map(p=>`<option value="${p.id}" ${f.project===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select></label>`:''}<label class="task-filter-search">搜索实验<input data-task-filter="query" type="search" value="${esc(f.query)}" placeholder="实验名称或 #编号"></label><div class="task-filter-result"><span>显示 <b>${visible.length}</b> / ${tasks.length}</span>${button('task-filter-clear','重置','','small')}</div></section>`;
  return filters+(visible.length?taskFilterBaseTable(visible,compact):empty('没有匹配的实验','调整状态、项目或搜索条件可查看其他实验。'));
 };

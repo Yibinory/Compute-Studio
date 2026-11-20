@@ -37,8 +37,7 @@ render=function(){
   const [page,id]=route();if(page!=='dataset'){datasetBaseRender();return;}
   if(!datasetDetail||datasetDetail.id!==id){clearTimeout(datasetSearchTimer);datasetDetail={id,query:'',offset:0};}
   const v=datasetDetail;
-  document.querySelectorAll('[data-nav]').forEach(el=>el.classList.toggle('active',el.dataset.nav==='datasets'));
-  $('#breadcrumb').textContent='数据集 / '+(v.data?.dataset.name||'详情');$('#scheduler-button').textContent=state.settings.paused?'恢复调度':'暂停调度';$('#connection-state').textContent='已更新 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
+  setNavigation('datasets','数据集 / '+(v.data?.dataset.name||'详情'));
   if($('#main').dataset.datasetId!==id||!$('#dataset-summary')){
     $('#main').innerHTML=`<a class="dataset-back" href="#datasets">← 返回数据集</a><div id="dataset-heading"></div><div id="dataset-summary"></div><section class="card dataset-inventory"><div class="card-head"><h2>本机文件清单</h2><small class="muted">每页 100 个文件</small></div><form id="dataset-search"><label>搜索文件名或目录<input name="query" value="${esc(v.query)}" placeholder="例如 train/ 或 labels.csv" autocomplete="off"></label><button type="submit">搜索</button></form><div id="dataset-files"></div></section>`;
     $('#main').dataset.datasetId=id;datasetFileRows();

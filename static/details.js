@@ -82,7 +82,8 @@ async function fetchLogReader(view,force=false){
 render=function(){
   const [page,kind,id]=route();
   if(page==='transfer'||page==='logs'){
-    projectFileObserver?.disconnect();document.querySelectorAll('[data-nav]').forEach(el=>el.classList.toggle('active',el.dataset.nav===(page==='transfer'?'uploads':'tasks')));$('#breadcrumb').textContent=page==='transfer'?'传输详细记录':'实验日志';$('#connection-state').textContent='已更新 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});$('#scheduler-button').textContent=state.settings.paused?'恢复调度':'暂停调度';
+    projectFileObserver?.disconnect();
+    setNavigation(page==='transfer'?'uploads':'tasks',page==='transfer'?'传输详细记录':'实验日志');
     const key=route().join('/'),main=$('#main');if(main.dataset.reader!==key){main.dataset.reader=key;if(page==='logs')logView(kind).data=null;main.innerHTML=page==='transfer'?transferDetailSkeleton(transferView(kind,id)):logPageSkeleton(logView(kind));}
     if(page==='transfer'){const view=transferView(kind,id);updateTransferReader(view);fetchTransferReader(view);}else{const view=logView(kind);updateLogReader(view);fetchLogReader(view);}renderTransferDock();
   }else{delete $('#main').dataset.reader;detailBaseRender();if(page==='uploads')fetchTransferHistory();
