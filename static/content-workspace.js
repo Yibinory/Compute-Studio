@@ -30,7 +30,7 @@ async function contentStorageLoad(id){
 }
 const contentBaseRender=render;
 render=function(){contentBaseRender();if(!state.runtime_features?.content_store)return;
- const queued=(state.tasks||[]).filter(t=>['queued','waiting','blocked'].includes(t.status)).length;
+ const queued=(state.tasks||[]).filter(isAwaitingDispatch).length;
  if(state.settings.paused&&queued)$('#main')?.insertAdjacentHTML('afterbegin',`<aside class="content-dispatch-paused" role="status"><div><strong>全局调度已暂停</strong><p>${queued} 个实验已入队，等待恢复调度；入队不会自动解除全局暂停。</p></div>${button('content-resume-dispatch','恢复调度','','small')}</aside>`);
  const [page,id]=route();if(page==='tasks'||page==='project'&&projectTab==='tasks')$('#main .page-title .actions')?.insertAdjacentHTML('beforeend',(state.runtime_features.batch_queue?button('content-batch-queue','批量入队'):'')+button('content-batch-open','批量状态操作'));
  if(page==='project'&&projectTab==='content')contentStorageLoad(id).catch(e=>toast(e.message,true));

@@ -98,6 +98,7 @@ td .task-title { color: #234d7e; }
 .tabs button.active { color: #204d96; background: #e6eefb; }
 .task-list-filters > label, label, .task-filter-result { color: #496073; }
 .project-summary { font-size: 12px; }
+.project-numbers { flex-wrap: wrap; row-gap: 8px; }
 .projects-grid > .card::before { display: none; }
 .project-symbol { border-radius: 9px; color: #265cb9; background: #eaf1fc; }
 

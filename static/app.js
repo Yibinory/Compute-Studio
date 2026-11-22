@@ -37,13 +37,17 @@ function footer(text='保存'){return `<div class="form-footer">${button('close-
 const field=(title,key,value='',type='text',extra='')=>`<label ${extra}>${title}<input name="${key}" type="${type}" value="${esc(value)}"></label>`;
 function pageHead(title,subtitle,actions=''){return `<div class="page-title"><div><h1>${esc(title)}</h1><p>${esc(subtitle)}</p></div><div class="actions">${actions}</div></div>`;}
 function empty(title,description,action=''){return `<div class="empty"><span style="font-size:28px">◈</span><strong>${esc(title)}</strong><p>${esc(description)}</p>${action}</div>`;}
+const dispatchQueueStatuses = new Set(['queued', 'waiting', 'blocked']);
+function isAwaitingDispatch(task) {
+  return !task.archived && dispatchQueueStatuses.has(task.status);
+}
 function stats(servers, gpus) {
   const tasks = state.tasks || [];
   const items = [
     ['在线服务器', servers.filter(s => s.connected).length, `${servers.length} 台已配置`, 'servers'],
     ['可见 GPU', gpus.length, `${gpus.filter(g => g.is_idle).length} 张当前空闲`, 'overview'],
     ['执行中的实验', tasks.filter(t => ['running','staging','launching','canceling'].includes(t.status)).length,
-      `${tasks.filter(t => ['queued','waiting','blocked'].includes(t.status)).length} 个等待调度`, 'tasks'],
+      `${tasks.filter(isAwaitingDispatch).length} 个等待调度`, 'tasks'],
     ['本机已回传', tasks.filter(t => t.synced_at).length, `${(state.projects || []).length} 个项目空间`, 'uploads']
   ];
   return `<div class="stats">${items.map(([label,value,sub,icon]) => `<div class="stat"><span class="indicator">${studioIcon(icon, 'metric-icon')}</span><div class="label">${label}</div><div class="value">${value}</div><small>${sub}</small></div>`).join('')}</div>`;
@@ -69,11 +73,12 @@ function overview() {
     + tasksTable(state.tasks.filter(t => !t.archived).slice(-6).reverse(), true);
 }
 function projectsPage(projects=state.projects){
- const counts = new Map(projects.map(project => [project.id, { tasks: 0, completed: 0, replicas: 0 }]));
+ const counts = new Map(projects.map(project => [project.id, { tasks: 0, waiting: 0, completed: 0, replicas: 0 }]));
  for (const task of state.tasks) {
    const count = counts.get(task.project_id);
    if (!count) continue;
    count.tasks++;
+   if (isAwaitingDispatch(task)) count.waiting++;
    if (task.status === 'success') count.completed++;
  }
  for (const replica of state.replicas) {
@@ -82,7 +87,13 @@ function projectsPage(projects=state.projects){
  }
  return pageHead('项目空间','每个项目独立维护代码、任务依赖与服务器副本。',button('new-project','＋ 新建项目','','primary'))+(projects.length?`<div class="grid projects-grid">${projects.map(p=>{
   const count=counts.get(p.id);
-  return `<div class="card project-card ${p.archived?'is-archived':''}" data-project-card="${p.id}"><div class="project-card-heading"><div class="project-symbol">▦</div>${p.archived?'<span class="badge">已归档</span>':''}</div><h3>${esc(p.name)}</h3><p class="project-summary">${esc(p.description||'添加代码，配置实验，交给 GPU 资源池。')}</p><div class="project-numbers"><span><b>${count.tasks}</b>实验</span><span><b>${count.completed}</b>完成</span><span><b>${count.replicas}</b>远程副本</span></div><div class="card-foot"><small class="muted">${fmt(p.created_at).split(' ')[0]}</small><div class="project-card-actions">${state.runtime_features?.project_archive?button('project-archive',p.archived?'取消归档':'归档项目',`data-id="${p.id}" data-archived="${p.archived?'false':'true'}"`,'small'):''}<a href="#project/${p.id}">打开项目 →</a></div></div></div>`;
+  return `<div class="card project-card ${p.archived?'is-archived':''}" data-project-card="${p.id}"><div class="project-card-heading"><div class="project-symbol">▦</div>${p.archived?'<span class="badge">已归档</span>':''}</div><h3>${esc(p.name)}</h3><p class="project-summary">${esc(p.description||'添加代码，配置实验，交给 GPU 资源池。')}</p>
+    <div class="project-numbers">
+      <span><b>${count.tasks}</b>实验</span>
+      <span title="已入队、等待资源或等待前序实验"><b>${count.waiting}</b>等待调度</span>
+      <span><b>${count.completed}</b>完成</span>
+      <span><b>${count.replicas}</b>远程副本</span>
+    </div><div class="card-foot"><small class="muted">${fmt(p.created_at).split(' ')[0]}</small><div class="project-card-actions">${state.runtime_features?.project_archive?button('project-archive',p.archived?'取消归档':'归档项目',`data-id="${p.id}" data-archived="${p.archived?'false':'true'}"`,'small'):''}<a href="#project/${p.id}">打开项目 →</a></div></div></div>`;
  }).join('')}</div>`:empty('给实验一个项目空间','公共代码、每个任务的输入和输出都会保留在项目内。',button('new-project','创建项目','','primary')));
 }
 function projectTasksMarkup(tasks){return tasksTable(tasks);}

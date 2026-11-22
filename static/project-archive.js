@@ -8,7 +8,8 @@ projectsPage=function(){
  const all=state.projects||[],archived=all.filter(p=>p.archived).length,visible=all.filter(p=>projectsShowArchived||!p.archived);
  let html=projectArchiveBasePage(visible);
  if(all.length&&!visible.length)html=html.slice(0,html.indexOf('<div class="empty">'))+empty('暂无未归档项目','项目已保留在归档中，开启显示后即可查看或取消归档。',button('projects-show-archived','显示归档项目','','primary'));
- const controls=`<div class="project-archive-toolbar"><span>未归档 <b>${all.length-archived}</b> · 已归档 <b>${archived}</b></span><label><input type="checkbox" data-project-archive-visibility ${projectsShowArchived?'checked':''}>显示归档项目</label></div>`;
+ const waiting=state.tasks.filter(isAwaitingDispatch).length;
+ const controls=`<div class="project-archive-toolbar"><span>未归档 <b>${all.length-archived}</b> · 已归档 <b>${archived}</b> · 全部项目等待调度 <b>${waiting}</b></span><label><input type="checkbox" data-project-archive-visibility ${projectsShowArchived?'checked':''}>显示归档项目</label></div>`;
  return html.replace(/(<div class="grid projects-grid">|<div class="empty">)/,controls+'$1');
 };
 const projectArchiveBaseAction=handleAction;
