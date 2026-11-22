@@ -1,5 +1,6 @@
 """Build an allowlisted, data-free source export without touching runtime data."""
 import argparse
+import base64
 import hashlib
 import json
 import shutil
@@ -13,7 +14,14 @@ CODE_DIRS = {'scheduler': {'.py'}, 'templates': {'.html'}, 'tests': {'.py', '.js
              'examples': {'.py', '.sh', '.json'}}
 STATIC_EXTENSIONS = {'.js', '.css', '.png', '.json', '.ttf', '.woff', '.woff2'}
 TEXT_EXTENSIONS = {'.py','.js','.css','.html','.md','.json','.sh','.txt','.bat'}
-GUIDE = 'docs/实验脚本与批量配置指导.md'
+GUIDES = ('docs/实验脚本与批量配置指导.md', 'docs/AI操作接口.md')
+
+
+def write_guide_fallback(root):
+    # Running controllers reload templates before they can serve new Flask routes.
+    document = (root / 'docs' / 'AI操作接口.md').read_bytes()
+    (root / 'templates' / 'ai-guide-download.uri').write_bytes(
+        b'data:text/markdown;charset=utf-8;base64,' + base64.b64encode(document))
 
 
 def build(output):
@@ -26,7 +34,8 @@ def build(output):
     for folder, extensions in CODE_DIRS.items():
         selected.extend(p for p in (ROOT / folder).rglob('*') if p.is_file() and p.suffix in extensions and '__pycache__' not in p.parts)
     selected.extend(p for p in (ROOT / 'static').rglob('*') if p.is_file() and (p.suffix in STATIC_EXTENSIONS or p.name == 'LICENSE'))
-    selected.extend([ROOT / GUIDE, ROOT / 'scripts/prepare_public_release.py', ROOT / 'scripts/audit_public_release.py'])
+    selected.extend(ROOT / guide for guide in GUIDES)
+    selected.extend([ROOT / 'scripts/prepare_public_release.py', ROOT / 'scripts/audit_public_release.py'])
     selected.extend(p for p in (ROOT/'docs/images'/name for name in ('overview.png','experiments.png','results.png')) if p.is_file())
     output.mkdir(parents=True)
     for source in sorted(set(selected)):
@@ -37,6 +46,7 @@ def build(output):
             text=source.read_text(encoding='utf-8-sig').replace('\r\n','\n').replace('\r','\n')
             destination.write_bytes(text.replace('\n','\r\n').encode('utf-8') if source.suffix=='.bat' else text.encode('utf-8'))
         else:shutil.copy2(source, destination)
+    write_guide_fallback(output)
     # Never let an inherited production storage environment redirect demo data.
     demo = output / 'start_demo.bat'
     demo.write_text(demo.read_text(encoding='utf-8').replace('app.py --demo --port 8777', 'app.py --demo --data-dir "%~dp0data-demo" --port 8777'), encoding='utf-8')

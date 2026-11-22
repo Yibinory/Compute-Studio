@@ -35,6 +35,5 @@ handleAction=async function(el){
   const result=await controlBaseAction(el);refreshExperimentControls();return result;
 };
 if(document.body.dataset.authorized==='true'){
-  $('.top-actions')?.insertAdjacentHTML('afterbegin','<a class="small guide-link" href="/api/experiment-guide" download>实验指南 ↓</a>');
   setInterval(refreshExperimentControls,1000);
 }

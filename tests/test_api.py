@@ -73,13 +73,24 @@ def test_frontend_assets_change_version_without_controller_restart(client,tmp_pa
     assert c.get('/api/state').headers['Cache-Control']=='no-store'
 
 
-def test_experiment_guide_requires_login_and_downloads_complete_document(client):
+@pytest.mark.parametrize('route,filename,topics', [
+    ('/api/experiment-guide', '实验脚本与批量配置指导.md', ('SIGTERM', 'max_retries', 'DEPENDENCIES_JSON')),
+    ('/api/ai-guide', 'AI操作接口.md', ('studio_cli.py', 'import-experiments', 'configuration_revision')),
+])
+def test_guide_requires_login_and_downloads_complete_document(client, route, filename, topics):
+    from pathlib import Path
+    from werkzeug.http import parse_options_header
+
     c,app=client
-    assert c.get('/api/experiment-guide').status_code==401
-    login(c,app);response=c.get('/api/experiment-guide')
-    assert response.status_code==200 and 'attachment' in response.headers['Content-Disposition']
-    text=response.data.decode('utf-8')
-    assert 'SIGTERM' in text and 'max_retries' in text and 'DEPENDENCIES_JSON' in text
+    assert c.get(route).status_code == 401
+    login(c,app)
+    assert f'href="{route}" download' in c.get('/').get_data(as_text=True)
+    with c.get(route) as response:
+        assert response.status_code == 200
+        disposition, options = parse_options_header(response.headers['Content-Disposition'])
+        assert disposition == 'attachment' and options['filename'] == filename
+        assert response.data == (Path(app.root_path) / 'docs' / filename).read_bytes()
+        assert all(topic in response.get_data(as_text=True) for topic in topics)
 
 
 def test_authentication_and_csrf(client):

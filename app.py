@@ -122,7 +122,8 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
     @app.get('/')
     def index():
         session.setdefault('csrf',secrets.token_urlsafe(24))
-        return render_template('index.html',authorized=session.get('authorized',False),csrf=session['csrf'],token_path=str(engine.root/'access-token.txt'))
+        return render_template('index.html',authorized=session.get('authorized',False),csrf=session['csrf'],
+                               token_path=str(engine.root/'access-token.txt'), ai_guide_url=url_for('ai_guide'))
 
     @app.post('/login')
     def login():
@@ -153,6 +154,10 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
     @app.get('/api/experiment-guide')
     def experiment_guide():
         return send_file(install/'docs'/'实验脚本与批量配置指导.md',as_attachment=True)
+
+    @app.get('/api/ai-guide')
+    def ai_guide():
+        return send_file(install / 'docs' / 'AI操作接口.md', as_attachment=True)
 
     @app.get('/api/projects/<project_id>/source')
     def code_source_read(project_id):return jsonify(engine.code_sources.get(project_id))

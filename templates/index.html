@@ -66,7 +66,8 @@
   {% endif %}
   <link rel="stylesheet" href="{{ asset_url('console.css') }}">
 </head>
-<body data-authorized="{{ 'true' if authorized else 'false' }}">
+<body data-authorized="{{ 'true' if authorized else 'false' }}"{% if authorized %}
+      data-studio-root="{{ config.root_path }}" data-controller-port="{{ request.environ['SERVER_PORT'] }}"{% endif %}>
 {% if not authorized %}
 <main class="login-shell">
   <section class="login-story">
@@ -116,7 +117,11 @@
   </div>
   <div class="sidebar-foot"><span class="controller-symbol" aria-hidden="true">›_</span><div>本机控制器<small>SSH · SHA-256</small></div></div>
 </aside>
-<div class="workspace"><header class="topbar"><div><span class="muted">工作空间</span><span class="separator">/</span><span id="breadcrumb">资源总览</span></div><div class="top-actions"><span id="connection-state" class="muted">正在连接…</span><button data-action="refresh" class="icon-button" title="刷新页面" aria-label="刷新页面">↻</button><button data-action="toggle-scheduler" id="scheduler-button">暂停调度</button></div></header><main id="main" class="content" tabindex="-1"><div class="loading">正在加载工作空间…</div></main></div>
+<div class="workspace"><header class="topbar"><div><span class="muted">工作空间</span><span class="separator">/</span><span id="breadcrumb">资源总览</span></div><div class="top-actions">
+  <a class="small guide-link" href="/api/experiment-guide" download>实验指南 ↓</a>
+  {% if not ai_guide_url %}{% set ai_guide_url %}{% include 'ai-guide-download.uri' ignore missing %}{% endset %}{% endif %}
+  {% if ai_guide_url %}<a class="small guide-link" href="{{ ai_guide_url }}" download="AI操作接口.md">API 文档 ↓</a>{% endif %}
+  <span id="connection-state" class="muted">正在连接…</span><button data-action="refresh" class="icon-button" title="刷新页面" aria-label="刷新页面">↻</button><button data-action="toggle-scheduler" id="scheduler-button">暂停调度</button></div></header><main id="main" class="content" tabindex="-1"><div class="loading">正在加载工作空间…</div></main></div>
 <dialog id="dialog" aria-labelledby="dialog-title"><div class="dialog-top"><h2 id="dialog-title"></h2><button data-action="close-dialog" class="icon-button" aria-label="关闭">×</button></div><div id="dialog-body"></div></dialog><div id="toasts" aria-live="polite"></div>
 {% endif %}
 </body></html>
