@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -16,6 +17,11 @@ from scheduler.remote import Remote
 
 
 class LocalSFTP:
+    def putfo(self,stream,target,file_size,callback):
+        with Path(target).open('wb') as output:
+            shutil.copyfileobj(stream,output)
+        callback(file_size,file_size)
+
     def file(self,path,mode):return Path(path).open(mode)
 
     def lstat(self,path):return Path(path).lstat()
@@ -84,6 +90,13 @@ class FakeRemote(Remote):
         if action=='benchmark':
             return {'ok':True,'tensor_tflops':50}
         if action.startswith('dataset_'):
+            if action.startswith('dataset_batch_'):
+                proc=subprocess.run([sys.executable,'-X','utf8',str(Path(__file__).resolve().parents[1]/'scheduler'/'agent.py'),action],
+                                    input=json.dumps({**spec,'data_root':str(self.data_base)}),
+                                    capture_output=True,text=True,encoding='utf-8',timeout=15)
+                response=json.loads(proc.stdout)
+                if not response['ok']:raise RuntimeError(response['error'])
+                return response['result']
             if action=='dataset_marker':
                 p=self.data_base/('.compute-share-'+spec['token'])
                 if spec.get('write'):p.write_text(spec['token'])

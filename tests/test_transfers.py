@@ -14,6 +14,91 @@ from scheduler.remote import Remote
 from test_api import archive, client, login
 
 
+def test_dataset_batches_resume_from_verified_files(engine, setup_project, tmp_path, monkeypatch):
+    _, servers = setup_project
+    remote = engine.remote(servers[0])
+    source = tmp_path / 'batch-source'
+    source.mkdir()
+    monkeypatch.setattr('scheduler.remote.DATASET_BATCH_BYTES',128*1024)
+    for index in range(260):
+        (source / f'{index:03}.dat').write_bytes(bytes([index % 256]) * 1024)
+    inventory = manifest(source)
+    spec = {'name':'packed'}
+    target = remote.data_base / 'packed'
+    transfers = []
+    putfo = remote.sftp.putfo
+
+    def upload(stream, dest, file_size, callback):
+        transfers.append(file_size)
+        putfo(stream, dest, file_size, callback)
+        if len(transfers) == 2:
+            raise OperationCanceled('test cancellation')
+
+    monkeypatch.setattr(remote.sftp, 'putfo', upload)
+    with pytest.raises(OperationCanceled):
+        remote.upload(source, spec, '', dataset=True, inventory=inventory)
+    assert len(manifest(target)) == 128
+    assert not list(remote.data_base.glob('.compute-batch-*'))
+    events = {}
+    def report(entries, status):
+        for path in entries:
+            events.setdefault(path, []).append(status)
+    remote.upload(source, spec, '', dataset=True, inventory=inventory, batch_event=report)
+    assert manifest(target) == inventory
+    assert len(transfers) == 4
+    assert sum(status == ['skipped'] for status in events.values()) == 128
+    assert sum(status == ['uploading','verifying','success'] for status in events.values()) == 132
+
+
+def test_dataset_batch_rejects_corruption_before_replacing_existing_files(engine, setup_project, tmp_path, monkeypatch):
+    _, servers = setup_project
+    remote = engine.remote(servers[0])
+    source = tmp_path / 'data'
+    source.mkdir()
+    for index in range(32):
+        (source / str(index)).write_bytes(b'new')
+    target = remote.data_base / 'packed'
+    target.mkdir()
+    (target / '0').write_bytes(b'old')
+    putfo = remote.sftp.putfo
+    def corrupt(stream, dest, file_size, callback):
+        putfo(stream, dest, file_size, callback)
+        with Path(dest).open('r+b') as payload:
+            payload.seek(-1, 2)
+            payload.write(b'!')
+    monkeypatch.setattr(remote.sftp, 'putfo', corrupt)
+    with pytest.raises(RuntimeError, match='校验失败'):
+        remote.upload(source, {'name':'packed'}, '', dataset=True)
+    assert list(target.iterdir()) == [target / '0']
+    assert (target / '0').read_bytes() == b'old'
+    assert not list(remote.data_base.glob('.compute-batch-*'))
+
+
+def test_retry_lost_batch_receipt_probes_only_uncertain_members(engine,setup_project,tmp_path,monkeypatch):
+    remote=engine.remote(setup_project[1][0])
+    local=tmp_path/'receipt-loss'
+    local.mkdir()
+    for i in range(64):
+        (local/str(i)).write_bytes(b'x'*4096)
+    expected=manifest(local)
+    original=remote.call
+    committed=[]
+    probes=[]
+    def flaky(action,payload=None,timeout=120):
+        result=original(action,payload,timeout)
+        if action=='dataset_batch_commit':
+            committed.extend(item[0] for item in payload['entries'])
+            if len(committed)==32:raise EOFError('lost receipt')
+        if action=='dataset_batch_probe':probes.extend(payload['paths'])
+        return result
+    monkeypatch.setattr(remote,'call',flaky)
+    monkeypatch.setattr('scheduler.remote.DATASET_BATCH_BYTES',32*4096)
+    remote.upload(local,{'name':'receipt'},'',dataset=True,inventory=expected,existing_inventory={},verify_after=False)
+    assert len(committed)==len(set(committed))==64
+    assert set(probes)==set(committed[:32])
+    assert manifest(remote.data_base/'receipt')==expected
+
+
 def wait_job(engine,key):
     deadline=time.monotonic()+8
     while time.monotonic()<deadline:

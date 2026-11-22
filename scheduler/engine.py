@@ -1179,8 +1179,14 @@ class Engine:
         def worker_update(kind,event,scratch,pid):
             if kind=='progress':
                 self.progress(job,**{k:v for k,v in event.items() if k!='type'},worker_pid=pid)
-        checked=file_process(self.root,'manifest',path=str(local),update=worker_update,check=lambda:self.check_cancel(job))
-        if checked!=dataset['manifest']:
+        checked=dataset['manifest']
+        if len(checked)>=50000:
+            from .dataset_snapshot import expected
+            snapshot=file_process(self.root,'dataset_snapshot',path=str(local),total=sum(v['size'] for v in checked.values()),count=len(checked),update=worker_update,check=lambda:self.check_cancel(job))
+            valid=snapshot['count']==len(checked) and snapshot['sha256']==expected(checked)
+        else:
+            valid=file_process(self.root,'manifest',path=str(local),update=worker_update,check=lambda:self.check_cancel(job))==checked
+        if not valid:
             raise ValueError('本机数据集发生变化，请重新导入')
         self.transfers.prepare(job,servers,checked)
         self.check_cancel(job)
@@ -1220,7 +1226,7 @@ class Engine:
                     self.check_cancel(job)
                     try:
                         candidate_remote=self.remote(candidate)
-                        existing=candidate_remote.cancellable_call('dataset_manifest',{'name':dataset['name']},timeout=hash_timeout,check=lambda:self.check_cancel(job))['files']
+                        existing=candidate_remote.cancellable_call('dataset_manifest',{'name':dataset['name'],'parallel_scan':len(checked)>=50000},timeout=hash_timeout,check=lambda:self.check_cancel(job))['files']
                         source,remote=candidate,candidate_remote
                         break
                     except OperationCanceled:
@@ -1239,8 +1245,12 @@ class Engine:
                     if status=='uploading' and now-last_file_update[0]<.25 and done: return
                     last_file_update[0]=now
                     self.transfers.update(job,[s['id'] for s in group],path,status,done,error)
+                def batch_event(entries,status):
+                    current_file[0]=next(iter(entries))
+                    amounts={path:0 if status=='uploading' else item['size'] for path,item in entries.items()}
+                    self.transfers.update_many(job,[s['id'] for s in group],amounts,status)
                 self.progress(job,phase='syncing',server=source['name'],bytes=0,total=sum(v['size'] for v in checked.values()),groups_total=len(groups),group_index=groups.index(group)+1)
-                remote.upload(local,{'name':dataset['name']},'',dataset=True,progress=progress,inventory=checked,cancel_check=lambda:self.check_cancel(job),file_event=file_event,existing_inventory=existing,verify_after=False)
+                remote.upload(local,{'name':dataset['name']},'',dataset=True,progress=progress,inventory=checked,cancel_check=lambda:self.check_cancel(job),file_event=file_event,existing_inventory=existing,verify_after=False,batch_event=batch_event)
                 failures.extend(self._verify_dataset_group(dataset,group,source,checked,hash_timeout,metadata_timeout,job))
             except OperationCanceled as exc:
                 for s in group:
@@ -1288,25 +1298,35 @@ class Engine:
     def _verify_dataset_group(self,dataset,group,source,checked,hash_timeout,metadata_timeout,job=None):
         remote=self.remote(source);failures=[]
         token=uid();verified_source=None
+        compact=len(checked)>=50000
+        if compact:
+            hash_timeout=max(hash_timeout,len(checked)*.025)
+            metadata_timeout=max(metadata_timeout,len(checked)*.0125)
+        from .dataset_snapshot import expected
+        request={'name':dataset['name'],'token':token,'compact':compact}
         try:
             for s in [source]+[member for member in group if member['id']!=source['id']]:
                 self.progress(job,phase='verifying_remote',server=s['name'],bytes=0,total=0)
                 content_mismatch=False
                 try:
                     if s['id']==source['id']:
-                        verification=remote.cancellable_call('dataset_verify_snapshot',{'name':dataset['name'],'token':token},timeout=hash_timeout,check=lambda:self.check_cancel(job))
-                        self.transfers.verify(job,s['id'],verification['files'])
-                        content_mismatch=verification['files']!=checked or bool(verification['skipped'])
+                        verification=remote.cancellable_call('dataset_verify_snapshot',request,timeout=hash_timeout,check=lambda:self.check_cancel(job))
+                        if compact:
+                            content_mismatch=verification['count']!=len(checked) or verification['sha256']!=expected(checked)
+                            if not content_mismatch:self.transfers.verify(job,s['id'],checked)
+                        else:
+                            self.transfers.verify(job,s['id'],verification['files'])
+                            content_mismatch=verification['files']!=checked or bool(verification['skipped'])
                         if content_mismatch:raise ValueError('服务器 '+s['name']+' 数据集内容校验不一致')
                         verified_source=verification;method='sha256'
                     else:
                         if verified_source is None:raise TimeoutError('共享来源尚未完成内容核验')
-                        view=self.remote(s).cancellable_call('dataset_shared_verify',{'name':dataset['name'],'token':token},timeout=metadata_timeout,check=lambda:self.check_cancel(job))
-                        if view['metadata']!=verified_source['metadata'] or view['skipped']:
+                        view=self.remote(s).cancellable_call('dataset_shared_verify',request,timeout=metadata_timeout,check=lambda:self.check_cancel(job))
+                        if view['metadata']!=verified_source['metadata'] or view.get('skipped'):
                             content_mismatch=True
                             raise ValueError('服务器 '+s['name']+' 共享数据文件视图不一致，请检查挂载或文件变化')
                         method='shared_sha256'
-                        self.transfers.verify(job,s['id'],verified_source['files'],method,source['id'])
+                        self.transfers.verify(job,s['id'],checked if compact else verified_source['files'],method,source['id'])
                     dataset['servers'][s['id']]={'status':'success','verified_at':time.time(),'shared_with':source['id'],'verification_method':method}
                 except OperationCanceled:
                     raise

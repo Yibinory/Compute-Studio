@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import glob
+import gzip
+import io
 import json
 import os
 import re
@@ -9,6 +11,7 @@ import posixpath
 import shlex
 import threading
 import time
+import uuid
 from contextlib import nullcontext,contextmanager
 from pathlib import Path
 
@@ -22,6 +25,31 @@ from .logs import tail_stream, chunk_stream
 HOST_KEY_LOCK = threading.RLock()
 CALL_CONTEXT = threading.local()
 LOG_OPEN_TIMEOUT = 10
+DATASET_BATCH_BYTES = 24 * 1024**2
+DATASET_BATCH_FILES = 4096
+
+
+def upload_groups(inventory, dataset, existing):
+    group = {}
+    size = 0
+    for rel, item in inventory.items():
+        length = item['size']
+        packable = dataset and length <= 1024**2
+        if packable and existing:
+            partial = rel + '.upload-' + item['sha256']
+            # Let the original commit path consume its own interrupted temporary file.
+            if partial in existing and partial not in inventory:
+                packable = False
+        if group and (len(group) == DATASET_BATCH_FILES or size + length > DATASET_BATCH_BYTES or not packable):
+            yield group
+            group, size = {}, 0
+        if packable:
+            group[rel] = item
+            size += length
+        else:
+            yield {rel: item}
+    if group:
+        yield group
 
 
 def read_ssh_config(path=None):
@@ -132,8 +160,24 @@ class Remote:
             except OSError:
                 pass
             if publish_helpers:
-                for file in ('agent.py','probe.py','object_agent.py'):
-                    self.sftp.put(str(Path(__file__).parent/file), self.agent_root+'/'+file)
+                for file in ('probe.py','object_agent.py','dataset_snapshot.py','agent.py'):
+                    destination = self.agent_root+'/'+file
+                    temporary = destination+'.'+uuid.uuid4().hex+'.tmp'
+                    try:
+                        self.sftp.put(str(Path(__file__).parent/file),temporary)
+                        # Never truncate a helper another SSH session is starting.
+                        try:
+                            self.sftp.posix_rename(temporary,destination)
+                        except OSError:
+                            program='import os,sys; os.replace(sys.argv[1],sys.argv[2])'
+                            command=' '.join(shlex.quote(v) for v in ('python3','-c',program,temporary,destination))
+                            _,stdout,stderr=self.client.exec_command(command,timeout=15)
+                            if stdout.channel.recv_exit_status():
+                                raise RuntimeError(stderr.read().decode('utf-8','replace')[-500:])
+                    except Exception:
+                        try:self.sftp.remove(temporary)
+                        except OSError:pass
+                        raise
             self.server['work_root'] = self.server['work_root'].replace('~/', home+'/',1) if self.server['work_root'].startswith('~/') else self.server['work_root']
             self.server['data_root'] = self.server['data_root'].replace('~/', home+'/',1) if self.server['data_root'].startswith('~/') else self.server['data_root']
         except Exception:
@@ -272,7 +316,9 @@ class Remote:
                 while True:
                     check()
                     if time.monotonic()>deadline:raise TimeoutError('远程请求超时')
-                    if channel.recv_ready():chunks.append(channel.recv(65536))
+                    if channel.recv_ready():
+                        chunks.append(channel.recv(262144))
+                        continue
                     if channel.recv_stderr_ready():errors.append(channel.recv_stderr(65536))
                     if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():break
                     time.sleep(.03)
@@ -287,16 +333,72 @@ class Remote:
         try:
             value = json.loads(output)
         except ValueError:
+            if not output.strip() and not error.strip():
+                raise EOFError('远程通道关闭，未收到操作回执')
             raise RuntimeError('远程响应无效：'+(error or output)[-1500:])
         if not value.get('ok'):
             raise RuntimeError(value.get('error','远程操作失败'))
         return value['result']
 
-    def upload(self, local, spec, prefix, dataset=False, progress=None, inventory=None, cancel_check=None,file_event=None,existing_inventory=None,verify_after=True):
+    def upload(self, local, spec, prefix, dataset=False, progress=None, inventory=None, cancel_check=None,file_event=None,existing_inventory=None,verify_after=True,batch_event=None):
+        if not dataset or inventory is None or existing_inventory is None or verify_after:
+            return self._upload_once(local,spec,prefix,dataset,progress,inventory,cancel_check,file_event,existing_inventory,verify_after,batch_event)
+        # The engine supplies a hash-checked remote plan and verifies the complete
+        # shared group after this call. Keep acknowledged entries across reconnects.
+        completed, uncertain = set(), set()
+        confirmed_bytes = 0
+        total = sum(item['size'] for item in inventory.values())
+        remaining = inventory
+        before = existing_inventory
+        def track(paths, status):
+            nonlocal confirmed_bytes
+            if status in ('uploading','verifying'):
+                uncertain.update(paths)
+            elif status in ('skipped','success'):
+                for path in paths:
+                    uncertain.discard(path)
+                    if path not in completed:
+                        completed.add(path)
+                        confirmed_bytes += inventory[path]['size']
+        def single(path,status,done=0,error=None):
+            track((path,),status)
+            if file_event:file_event(path,status,done,error)
+        def batch(entries,status):
+            track(entries,status)
+            if batch_event:batch_event(entries,status)
+            elif file_event:
+                for path,item in entries.items():
+                    file_event(path,status,0 if status=='uploading' else item['size'])
+        failures = 0
+        while True:
+            offset = confirmed_bytes
+            try:
+                if failures:
+                    seen = self.cancellable_call('dataset_batch_probe',{**spec,'paths':sorted(uncertain)},check=cancel_check)['files']
+                    before = {**before, **seen}
+                    for path in uncertain.difference(seen):
+                        before.pop(path,None)
+                    remaining = {p:v for p,v in inventory.items() if p not in completed}
+                    uncertain.clear()
+                def report(n,_):
+                    if progress:progress(offset+n,total)
+                return self._upload_once(local,spec,prefix,True,report,remaining,cancel_check,single,before,False,batch)
+            except (EOFError,paramiko.SSHException,ConnectionError,TimeoutError,OSError) as exc:
+                if isinstance(exc,(FileNotFoundError,PermissionError,IsADirectoryError)) or getattr(exc,'errno',None) in (13,28,30):
+                    raise
+                if cancel_check:cancel_check()
+                failures = 1 if confirmed_bytes > offset else failures + 1
+                if failures > 12:raise
+                deadline = time.monotonic() + min(60, 2**failures)
+                while time.monotonic() < deadline:
+                    if cancel_check:cancel_check()
+                    time.sleep(min(.5,max(0,deadline-time.monotonic())))
+
+    def _upload_once(self, local, spec, prefix, dataset, progress, inventory, cancel_check,file_event,existing_inventory,verify_after,batch_event):
         # A dedicated SFTP channel lets a stalled transfer be interrupted without
         # disconnecting monitors or SSH requests belonging to other experiments.
         if not cancel_check or not getattr(self,'client',None):
-            return self._upload(local,spec,prefix,dataset,progress,inventory,cancel_check=cancel_check,file_event=file_event,existing_inventory=existing_inventory,verify_after=verify_after)
+            return self._upload(local,spec,prefix,dataset,progress,inventory,cancel_check=cancel_check,file_event=file_event,existing_inventory=existing_inventory,verify_after=verify_after,batch_event=batch_event)
         cancel_check()
         with self.lock:
             channel=self.client.open_sftp()
@@ -310,14 +412,57 @@ class Remote:
                     return
         watcher=threading.Thread(target=watch,name='transfer-interrupt',daemon=True);watcher.start()
         try:
-            return self._upload(local,spec,prefix,dataset,progress,inventory,transfer_sftp=channel,cancel_check=cancel_check,file_event=file_event,existing_inventory=existing_inventory,verify_after=verify_after)
+            return self._upload(local,spec,prefix,dataset,progress,inventory,transfer_sftp=channel,cancel_check=cancel_check,file_event=file_event,existing_inventory=existing_inventory,verify_after=verify_after,batch_event=batch_event)
         except Exception:
             cancel_check()
             raise
         finally:
             stopped.set();channel.close();watcher.join(timeout=1)
 
-    def _upload(self, local, spec, prefix, dataset=False, progress=None, inventory=None, transfer_sftp=None, cancel_check=None,file_event=None,existing_inventory=None,verify_after=True):
+    def _send_dataset_batch(self, local, spec, entries, transfer_sftp, check, transferred, report):
+        size = sum(item['size'] for item in entries.values())
+        request = {**spec, 'token': uuid.uuid4().hex}
+        with io.BytesIO() as payload:
+            for rel, item in entries.items():
+                check()
+                with (Path(local) / rel).open('rb') as source:
+                    block = source.read(item['size'] + 1)
+                if len(block) != item['size']:
+                    raise ValueError('本机数据集文件大小变化：' + rel)
+                payload.write(block)
+            payload.seek(0)
+            sample = payload.read(min(size, 256 * 1024))
+            payload.seek(0)
+            encoded = payload
+            wire_size = size
+            if sample and len(gzip.compress(sample, compresslevel=1)) < .90 * len(sample):
+                packed = gzip.compress(payload.getbuffer(), compresslevel=1)
+                if len(packed) < .95 * size:
+                    encoded = io.BytesIO(packed)
+                    wire_size = len(packed)
+                    request['encoding'] = 'gzip'
+                del packed
+            check()
+            dest = self.call('dataset_batch_prepare', request, timeout=30)['path']
+            try:
+                check()
+                with nullcontext() if transfer_sftp else self.lock:
+                    def on_wire(amount, length):
+                        transferred(size * amount // max(wire_size, 1), size)
+                    (transfer_sftp or self.sftp).putfo(encoded, dest, file_size=wire_size, callback=on_wire)
+                report(entries, 'verifying')
+                members = [(path, item['size'], item['sha256']) for path, item in entries.items()]
+                result = self.cancellable_call('dataset_batch_commit', {**request, 'entries':members}, timeout=300, check=check)
+                if result.get('committed') != len(entries):
+                    raise RuntimeError('服务器数据批次回执不完整')
+            except Exception:
+                try:
+                    self.call('dataset_batch_discard', request, timeout=10)
+                except Exception:
+                    pass
+                raise
+
+    def _upload(self, local, spec, prefix, dataset=False, progress=None, inventory=None, transfer_sftp=None, cancel_check=None,file_event=None,existing_inventory=None,verify_after=True,batch_event=None):
         action = 'dataset_' if dataset else ''
         inventory = manifest(local) if inventory is None else inventory
         total = sum(v['size'] for v in inventory.values())
@@ -326,8 +471,36 @@ class Remote:
             if cancel_check:cancel_check()
             if progress:progress(done,total)
         before = existing_inventory if existing_inventory is not None else self.cancellable_call(action+'manifest', {**spec, **({} if dataset else {'relative':prefix})},check=check)['files']
-        for rel, item in inventory.items():
-            if check:check()
+        def report(entries, status):
+            if not entries:return
+            if batch_event:batch_event(entries, status)
+            elif file_event:
+                for path, item in entries.items():
+                    file_event(path, status, 0 if status=='uploading' else item['size'])
+
+        for group in upload_groups(inventory, dataset and len(inventory) >= 32, before):
+            check()
+            if len(group) > 1:
+                skipped, missing = {}, {}
+                for rel, item in group.items():
+                    if before.get(rel, {}).get('sha256') == item['sha256']:
+                        skipped[rel] = item
+                    else:
+                        missing[rel] = item
+                report(skipped, 'skipped')
+                done += sum(item['size'] for item in skipped.values())
+                if missing:
+                    report(missing, 'uploading')
+                    def transferred(amount, length):
+                        if cancel_check:cancel_check()
+                        if progress:progress(done + amount, total)
+                    self._send_dataset_batch(local, spec, missing, transfer_sftp,
+                                             cancel_check or (lambda: None), transferred, report)
+                    report(missing, 'success')
+                    done += sum(item['size'] for item in missing.values())
+                if progress:progress(done, total)
+                continue
+            rel, item = next(iter(group.items()))
             if before.get(rel,{}).get('sha256') != item['sha256']:
                 remote_rel = rel if dataset else prefix+'/'+rel
                 # Deterministic temporary names allow a retried immutable upload

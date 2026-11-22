@@ -47,6 +47,31 @@ def test_durable_per_server_skip_upload_replace_decisions(engine,setup_project):
     assert engine.store.db.execute('SELECT count(*) FROM transfer_files WHERE job_id=?',(job['id'],)).fetchone()[0]==6
 
 
+def test_mixed_dataset_batches_keep_file_journal_and_resume_legacy_partial(engine,setup_project):
+    _,servers=setup_project
+    ds,local=dataset(engine)
+    for i in range(40):
+        (local/f'sample-{i}.txt').write_text(str(i))
+    (local/'large.bin').write_bytes(b'x'*(1024**2+1))
+    ds['manifest']=manifest(local)
+    engine.store.put('datasets',ds)
+    remote=engine.remote(servers[0])
+    dest=remote.data_base/ds['name']
+    dest.mkdir()
+    (dest/'same.txt').write_text('same')
+    partial=dest/('new.txt.upload-'+ds['manifest']['new.txt']['sha256'])
+    partial.write_text('incomplete')
+    job=engine.enqueue('mixed dataset',engine.upload_dataset,ds['id'])
+    assert wait(engine,job)['status']=='success'
+    assert manifest(dest)==ds['manifest'] and not partial.exists()
+    rows=engine.transfers.page(job['id'])['files']
+    assert len(rows)==2*len(ds['manifest'])
+    assert all(row['current_state']=='matching' for row in rows)
+    assert sum(row['status']=='skipped' for row in rows)==1
+    packed=next(row for row in rows if row['path']=='sample-15.txt')
+    assert [e['status'] for e in packed['events']]==['planned','uploading','verifying','success','verified']
+
+
 def test_shared_group_records_one_actual_upload_with_peer_verification(engine,setup_project):
     _,servers=setup_project;ds,_=dataset(engine,'shared')
     shared=engine.root/'shared-datasets';shared.mkdir()

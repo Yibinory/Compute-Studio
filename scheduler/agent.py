@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
 import ctypes
 import json
 import os
@@ -12,7 +13,10 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
+import zlib
 from pathlib import Path, PurePosixPath
+from concurrent.futures import ThreadPoolExecutor
 
 import probe
 try:import object_agent
@@ -148,6 +152,67 @@ def tree_manifest(base, hashes=True, snapshot=False):
     result={'files': out, 'skipped': skipped, 'exists': True}
     if snapshot:result['metadata']=metadata
     return result
+
+
+def dataset_batch(action, base, dataset, spec):
+    token = spec['token']
+    if not re.fullmatch(r'[a-f0-9]{32}', token):
+        raise ValueError('无效的数据传输批次')
+    spool = safe_child(base, '.compute-batch-' + token)
+    if action == 'dataset_batch_prepare':
+        fd = os.open(spool, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+        return {'path': str(spool)}
+    if action == 'dataset_batch_discard':
+        spool.unlink(missing_ok=True)
+        return {}
+    try:
+        entries = spec['entries']
+        if (not 1 <= len(entries) <= 4096 or spool.stat().st_size > 64 * 1024**2
+                or sum(item[1] for item in entries) > 64 * 1024**2):
+            raise ValueError('数据批次过大')
+        # Validate the entire batch before replacing any destination.
+        directories = {}
+        reader = gzip.open if spec.get('encoding') == 'gzip' else open
+        with reader(spool, 'rb') as source:
+            for rel, size, expected_hash in entries:
+                member = PurePosixPath(rel)
+                if (not rel or rel != member.as_posix() or member.is_absolute() or '..' in member.parts
+                        or '\\' in rel or '\x00' in rel or not member.name):
+                    raise ValueError('非法批次路径')
+                if not 0 <= size <= 1024**2:
+                    raise ValueError('数据批次文件大小无效')
+                block = source.read(size)
+                if len(block) != size or hashlib.sha256(block).hexdigest() != expected_hash:
+                    raise ValueError('数据批次校验失败：' + rel)
+                directories.setdefault(member.parent, []).append((member.name, block))
+            if source.read(1):
+                raise ValueError('数据批次含多余内容')
+        def publish(directory):
+            parent = dataset if directory == PurePosixPath('.') else safe_child(dataset, directory.as_posix())
+            parent.mkdir(parents=True, exist_ok=True)
+            for filename, block in directories[directory]:
+                dest = parent / filename
+                if dest.is_symlink():
+                    raise ValueError('符号链接不允许写入')
+                tmp = parent / ('.compute-write-' + uuid.uuid4().hex)
+                output = tmp.open('xb')
+                try:
+                    with output:
+                        output.write(block)
+                    os.replace(tmp, dest)
+                finally:
+                    tmp.unlink(missing_ok=True)
+        if len(directories) > 1:
+            with ThreadPoolExecutor(max_workers=min(8,len(directories))) as executor:
+                list(executor.map(publish, directories))
+        else:
+            publish(next(iter(directories)))
+        return {'committed': len(entries)}
+    except (gzip.BadGzipFile, EOFError, zlib.error) as exc:
+        raise ValueError('压缩批次完整性校验失败') from exc
+    finally:
+        spool.unlink(missing_ok=True)
 
 
 def process_token(pid):
@@ -544,9 +609,23 @@ def dispatch(action, spec):
                 marker.unlink(missing_ok=True)
             return {'visible': marker.is_file() and marker.read_text() == spec['token']}
         dataset = safe_child(base, spec['name'])
+        if action == 'dataset_batch_probe':
+            paths = spec['paths']
+            if len(paths)>4096:raise ValueError('批次文件数超过上限')
+            found = {}
+            for rel in paths:
+                dest = safe_child(dataset, rel)
+                if dest.is_file():
+                    found[rel] = {'size':dest.stat().st_size,'sha256':file_hash(dest)}
+            return {'files':found}
+        if action in ('dataset_batch_prepare', 'dataset_batch_commit', 'dataset_batch_discard'):
+            return dataset_batch(action, base, dataset, spec)
         if action == 'dataset_exists':
             return {'exists': dataset.is_dir(), 'path':str(dataset)}
         if action == 'dataset_manifest':
+            if spec.get('parallel_scan') and dataset.is_dir():
+                from dataset_snapshot import scan
+                return scan(dataset,metadata=False,inventory_only=True)
             return tree_manifest(dataset)
         if action in ('dataset_verify_snapshot','dataset_shared_verify','dataset_verify_clear'):
             token=spec.get('token','')
@@ -556,13 +635,21 @@ def dispatch(action, spec):
                 if marker.is_file() and marker.read_text()==token:marker.unlink()
                 return {'removed':not marker.exists()}
             if action=='dataset_verify_snapshot':
-                result=tree_manifest(dataset,snapshot=True)
+                if spec.get('compact'):
+                    from dataset_snapshot import scan
+                    result={'exists':dataset.is_dir(),**scan(dataset)}
+                else:
+                    result=tree_manifest(dataset,snapshot=True)
                 if result['exists']:
                     with marker.open('x') as stream:stream.write(token)
                 return result
             if not marker.is_file() or marker.read_text()!=token:
                 raise ValueError('共享数据目录未能看到本次核验标记，请检查挂载或重新探测共享关系')
-            result=tree_manifest(dataset,hashes=False,snapshot=True)
+            if spec.get('compact'):
+                from dataset_snapshot import scan
+                result=scan(dataset,hashes=False,ignore_marker=token)
+            else:
+                result=tree_manifest(dataset,hashes=False,snapshot=True)
             if not marker.is_file() or marker.read_text()!=token:raise ValueError('共享数据目录在核验期间发生变化')
             return result
         if action == 'dataset_prepare':

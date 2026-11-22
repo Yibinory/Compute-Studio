@@ -1,6 +1,13 @@
 """Paginated, durable file decisions; never put large inventories in /state."""
 import json
 import time
+from itertools import islice, product
+
+
+def product_servers(servers,inventory):
+    for server in servers:
+        for item in inventory.items():
+            yield server,item
 
 
 class TransferJournal:
@@ -11,25 +18,27 @@ class TransferJournal:
             store.db.execute('CREATE INDEX IF NOT EXISTS transfer_files_status ON transfer_files(job_id,server_id,status)')
 
     def write_batches(self,sql,rows):
-        for offset in range(0,len(rows),1000):
+        rows=iter(rows)
+        while True:
+            batch=list(islice(rows,1000))
+            if not batch:return
             with self.store.lock,self.store.db:
-                self.store.db.executemany(sql,rows[offset:offset+1000])
+                self.store.db.executemany(sql,batch)
 
     def prepare(self,job,servers,inventory,action='pending'):
         if not job:return
         now=time.time()
-        rows=[]
-        for server in servers:
-            for path,item in inventory.items():
+        def rows():
+            for server,(path,item) in product_servers(servers,inventory):
                 data={'path':path,'server_id':server['id'],'server_name':server['name'],'expected_sha256':item['sha256'],'size':item['size'],'created_at':now,'events':[]}
-                rows.append((job['id'],server['id'],path,'queued',action,'unchecked',0,item['size'],json.dumps(data,ensure_ascii=False)))
-        self.write_batches('INSERT OR IGNORE INTO transfer_files VALUES (?,?,?,?,?,?,?,?,?)',rows)
+                yield job['id'],server['id'],path,'queued',action,'unchecked',0,item['size'],json.dumps(data,ensure_ascii=False)
+        self.write_batches('INSERT OR IGNORE INTO transfer_files VALUES (?,?,?,?,?,?,?,?,?)',rows())
 
     def plan(self,job,group,inventory,before,source):
         if not job:return
-        now=time.time();rows=[]
-        for server in group:
-            for path,item in inventory.items():
+        now=time.time()
+        def rows():
+            for server,(path,item) in product_servers(group,inventory):
                 remote=before.get(path)
                 initial='missing' if remote is None else 'matching' if remote['sha256']==item['sha256'] else 'mismatch'
                 action={'missing':'upload','matching':'skip','mismatch':'replace'}[initial]
@@ -37,14 +46,17 @@ class TransferJournal:
                       'expected_sha256':item['sha256'],'previous_sha256':remote.get('sha256') if remote else None,
                       'source_server_id':source['id'],'source_server_name':source['name'],'shared':server['id']!=source['id'],
                       'created_at':now,'updated_at':now,'events':[{'time':now,'status':'planned','message':action}]}
-                rows.append(('queued',action,initial,0,item['size'],json.dumps(data,ensure_ascii=False),job['id'],server['id'],path))
-        self.write_batches('UPDATE transfer_files SET status=?,action=?,initial_state=?,bytes=?,total=?,data=? WHERE job_id=? AND server_id=? AND path=?',rows)
+                yield 'queued',action,initial,0,item['size'],json.dumps(data,ensure_ascii=False),job['id'],server['id'],path
+        self.write_batches('UPDATE transfer_files SET status=?,action=?,initial_state=?,bytes=?,total=?,data=? WHERE job_id=? AND server_id=? AND path=?',rows())
 
     def update(self,job,server_ids,path,status,done=None,error=None):
+        self.update_many(job,server_ids,{path:done},status,error)
+
+    def update_many(self,job,server_ids,amounts,status,error=None):
         if not job:return
         now=time.time();updates=[]
         with self.store.lock,self.store.db:
-            for sid in server_ids:
+            for sid,(path,done) in product(server_ids,amounts.items()):
                 row=self.store.db.execute('SELECT status,bytes,total,data FROM transfer_files WHERE job_id=? AND server_id=? AND path=?',(job['id'],sid,path)).fetchone()
                 if not row:continue
                 previous,count,total,data=row;data=json.loads(data)
@@ -59,19 +71,25 @@ class TransferJournal:
 
     def verify(self,job,sid,inventory,method='sha256',source=None):
         if not job:return
-        now=time.time();updates=[]
-        with self.store.lock,self.store.db:
-            rows=self.store.db.execute('SELECT path,action,data FROM transfer_files WHERE job_id=? AND server_id=?',(job['id'],sid)).fetchall()
+        now=time.time()
+        source_name=self.store.get('servers',source)['name'] if source else None
+        last=''
+        while True:
+            with self.store.lock:
+                rows=self.store.db.execute('SELECT path,action,data FROM transfer_files WHERE job_id=? AND server_id=? AND path>? ORDER BY path LIMIT 1000',(job['id'],sid,last)).fetchall()
+            if not rows:return
+            last=rows[-1][0]
+            updates=[]
             for path,action,raw in rows:
                 data=json.loads(raw);actual=inventory.get(path,{}).get('sha256')
                 data.update(current_sha256=actual,current_state='missing' if actual is None else 'matching' if actual==data['expected_sha256'] else 'mismatch',verified_at=now,verification_method=method,verification_source=source)
-                if source:data.update(source_server_id=source,source_server_name=self.store.get('servers',source)['name'],shared=source!=sid)
+                if source:data.update(source_server_id=source,source_server_name=source_name,shared=source!=sid)
                 if data['current_state']=='matching':data['events'].append({'time':now,'status':'verified'})
                 if data['current_state']!='matching':
                     data['error']='服务器最终 hash 核验不一致'
                     data['events'].append({'time':now,'status':'failed'})
                 updates.append((data['current_state']=='matching',json.dumps(data,ensure_ascii=False),job['id'],sid,path))
-            self.store.db.executemany("UPDATE transfer_files SET status=CASE WHEN ? THEN CASE WHEN action='verify' THEN 'success' ELSE status END ELSE 'failed' END,bytes=CASE WHEN action='verify' THEN total ELSE bytes END,data=? WHERE job_id=? AND server_id=? AND path=?",updates)
+            self.write_batches("UPDATE transfer_files SET status=CASE WHEN ? THEN CASE WHEN action='verify' THEN 'success' ELSE status END ELSE 'failed' END,bytes=CASE WHEN action='verify' THEN total ELSE bytes END,data=? WHERE job_id=? AND server_id=? AND path=?",updates)
 
     def verification_pending(self,job,sid,error):
         if not job:return

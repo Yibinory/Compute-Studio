@@ -6,16 +6,37 @@ from pathlib import Path
 import pytest
 
 from scheduler import probe
+from scheduler import dataset_snapshot
 from scheduler.remote import read_ssh_config
 
 
 @pytest.fixture
 def agent(tmp_path,monkeypatch):
     monkeypatch.setitem(sys.modules,'probe',probe)
+    monkeypatch.setitem(sys.modules,'dataset_snapshot',dataset_snapshot)
     spec=importlib.util.spec_from_file_location('test_agent',Path(__file__).parents[1]/'scheduler'/'agent.py')
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     monkeypatch.setattr(module,'root_path',lambda raw:Path(raw).resolve())
     return module
+
+
+def test_compact_shared_snapshot_matches_paths_sizes_and_hashes(agent,tmp_path):
+    from scheduler.files import manifest
+    root=tmp_path/'data'
+    ds=root/'ecg'
+    (ds/'nested').mkdir(parents=True)
+    (ds/'nested'/'sample').write_bytes(b'ecg')
+    (ds/'empty').write_bytes(b'')
+    before=manifest(ds)
+    request={'data_root':str(root),'name':'ecg','compact':True,'token':'a'*32}
+    assert agent.dispatch('dataset_manifest',{**request,'parallel_scan':True})['files']==before
+    content=agent.dispatch('dataset_verify_snapshot',request)
+    assert (content['count'],content['bytes'],content['sha256'])==(2,3,dataset_snapshot.expected(before))
+    peer=agent.dispatch('dataset_shared_verify',request)
+    assert peer['metadata']==content['metadata']
+    agent.dispatch('dataset_verify_clear',request)
+    (ds/'nested'/'sample').rename(ds/'renamed')
+    assert dataset_snapshot.scan(ds)['sha256']!=content['sha256']
 
 
 def test_agent_ownership_and_cleanup_guard(agent,tmp_path):

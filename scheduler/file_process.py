@@ -78,6 +78,10 @@ def work(spec):
             emit('progress',phase=phase,bytes=done,total=total,path=path,files_done=count,files_total=files,**details)
         return report
     action=spec['action']
+    if action=='dataset_snapshot':
+        from .dataset_snapshot import scan
+        report=progress('hashing')
+        return scan(spec['path'],metadata=False,progress=lambda n,count:report(n,spec['total'],'',count,spec['count']))
     if action=='source-capture':
         from .source_files import capture
         return capture(spec,check,progress('source_sync'))
