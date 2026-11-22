@@ -68,4 +68,3 @@ function flowControls(){
 }
 styleControls=function(){flowBaseControls();flowControls();};
 document.addEventListener('change',e=>{if(e.target.name==='mode')flowControls();});
-if(document.body.dataset.authorized==='true')setInterval(()=>{if(state.jobs?.some(j=>j.operation?.startsWith('delete_dataset:')&&['queued','running'].includes(j.status)))load();},1000);

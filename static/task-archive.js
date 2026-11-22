@@ -10,21 +10,19 @@ function taskArchiveToolbar(tasks){
 const taskArchiveBaseTable=tasksTable;
 tasksTable=function(tasks,compact=false){
  if(!state.runtime_features?.task_archive)return taskArchiveBaseTable(tasks,compact);
- const visible=tasks.filter(t=>!t.archived||!compact&&taskArchiveVisible()),template=document.createElement('template');template.innerHTML=taskArchiveBaseTable(visible,compact);
- if(!compact)for(const task of visible){
-  const detail=template.content.querySelector(`[data-action=task-detail][data-id="${task.id}"]`),row=detail?.closest('tr');if(!row)continue;
-  if(task.archived){row.classList.add('task-is-archived');row.querySelectorAll('[data-action=task-queue],[data-action=task-retry],[data-action=task-pause],[data-action=task-resume],[data-action=task-cancel],[data-action=edit-task]').forEach(el=>el.remove());}
-  detail.insertAdjacentHTML('afterend',button('task-archive-one',task.archived?'恢复归档':'归档',`data-id="${task.id}"`,'small task-archive-button'));
-  if(task.archived)row.querySelector('td:not(.scheduling-select-cell)')?.insertAdjacentHTML('beforeend','<span class="task-archive-tag">已归档</span>');
- }
- return (!compact?taskArchiveToolbar(tasks):'')+template.innerHTML;
+ const showArchived=!compact&&taskArchiveVisible();
+ return (compact?'':taskArchiveToolbar(tasks))+taskArchiveBaseTable(showArchived?tasks:tasks.filter(t=>!t.archived),compact);
 };
 const taskArchiveBaseGraph=scheduleGraph;
 scheduleGraph=function(tasks){
  if(!state.runtime_features?.task_archive)return taskArchiveBaseGraph(tasks);
- const visible=tasks.filter(t=>!t.archived||taskArchiveVisible()),template=document.createElement('template');template.innerHTML=taskArchiveBaseGraph(visible);
- for(const task of visible.filter(t=>t.archived)){const node=template.content.querySelector(`[data-node-id="${task.id}"]`);if(node){node.classList.add('task-node-archived');node.querySelector('.flow-status-text')?.insertAdjacentHTML('afterbegin','<span class="task-archive-tag">已归档</span>');}}
- return taskArchiveToolbar(tasks)+template.innerHTML;
+ const showArchived=taskArchiveVisible(),visible=showArchived?tasks:tasks.filter(t=>!t.archived);
+ const toolbar=taskArchiveToolbar(tasks),graph=taskArchiveBaseGraph(visible);
+ if(!showArchived||!tasks.some(t=>t.archived))return toolbar+graph;
+ const archived=new Set(tasks.filter(t=>t.archived).map(t=>t.id)),template=document.createElement('template');
+ template.innerHTML=graph;
+ for(const node of template.content.querySelectorAll('[data-node-id]'))if(archived.has(node.dataset.nodeId)){node.classList.add('task-node-archived');node.querySelector('.flow-status-text')?.insertAdjacentHTML('afterbegin','<span class="task-archive-tag">已归档</span>');}
+ return toolbar+template.innerHTML;
 };
 const taskArchiveBaseSchedulingTasks=schedulingTasks;
 schedulingTasks=function(){return taskArchiveBaseSchedulingTasks().filter(t=>!t.archived);};

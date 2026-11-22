@@ -9,14 +9,27 @@ const fmt = t => t ? new Date(t*1000).toLocaleString('zh-CN',{hour12:false}) : '
 const size = n => n>=1073741824 ? (n/1073741824).toFixed(1)+' GB' : n>=1048576 ? (n/1048576).toFixed(1)+' MB' : n>=1024 ? (n/1024).toFixed(1)+' KB' : n+' B';
 const button = (action,text,attrs='',cls='') => `<button data-action="${action}" class="${cls}" ${attrs}>${text}</button>`;
 let dialogRevision=0;
-let state={}, projectTab='tasks', scopeTask='', dialogKind='', selectedTask='', jobStatuses=new Map(), initial=true, loading=false;
-let lastPollSignature=null;
+let state={}, projectTab='tasks', scopeTask='', dialogKind='', selectedTask='', jobStatuses=new Map(), initial=true;
+let lastPollSignature=null, activeStateRead=null, lastStateReadAt=0;
 function pollPageSignature(value){
-  if(['overview','servers','benchmarks','settings'].includes(route()[0]||'overview'))return null;
+  const [page,id]=route();
+  if(['overview','servers','benchmarks','settings'].includes(page))return null;
+  if(page==='projects'){
+    return JSON.stringify([page,value.projects,value.runtime_features,value.settings.paused,
+      value.tasks.map(t=>[t.project_id,t.status,t.archived]),value.replicas.map(r=>[r.project_id,r.exists])]);
+  }
+  if(page==='tasks'||(page==='project'&&projectTab==='tasks')){
+    const tasks=page==='tasks'?value.tasks:value.tasks.filter(t=>t.project_id===id);
+    const graphClock=page==='project'&&graphMode&&tasks.some(t=>['running','suspended'].includes(t.status))
+      ? Math.floor(Date.now()/30000) : 0;
+    return JSON.stringify([page,id,value.runtime_features,value.projects,tasks,value.servers.map(s=>[s.id,s.name]),
+      page==='project'?value.notes:null,graphClock,value.settings.paused,value.settings.paused?value.tasks.filter(isAwaitingDispatch).length:0]);
+  }
   const servers=(value.servers||[]).map(({snapshot,history,...server})=>server);
   const {free_bytes,total_bytes,...storage}=value.local_storage||{};
-  const liveElapsed=(value.tasks||[]).some(t=>['running','suspended'].includes(t.status)&&(route()[0]!=='project'||t.project_id===route()[1]))?Math.floor(Date.now()/30000):0;
-  return JSON.stringify([route().join('/'),projectTab,liveElapsed,{...value,servers,local_storage:storage}]);
+  const liveElapsed=(value.tasks||[]).some(t=>['running','suspended'].includes(t.status)&&(page!=='project'||t.project_id===id))
+    ? Math.floor(Date.now()/30000) : 0;
+  return JSON.stringify([location.hash,projectTab,liveElapsed,{...value,servers,local_storage:storage}]);
 }
 const projectBy = id => state.projects?.find(p=>p.id===id);
 const serverBy = id => state.servers?.find(s=>s.id===id);
@@ -53,7 +66,32 @@ function stats(servers, gpus) {
   return `<div class="stats">${items.map(([label,value,sub,icon]) => `<div class="stat"><span class="indicator">${studioIcon(icon, 'metric-icon')}</span><div class="label">${label}</div><div class="value">${value}</div><small>${sub}</small></div>`).join('')}</div>`;
 }
 function gpuCard(server,gpu){const key=gpu.uuid||String(gpu.index), blocked=server.blocked_gpus?.includes(key), used=gpu.memory_used_mb||0,total=gpu.memory_total_mb||1;return `<div class="card"><div class="card-head"><span class="muted" style="font-size:12px">${esc(server.name)} · GPU ${gpu.index}</span><span class="badge ${blocked?'':'green'}">${blocked?'已屏蔽':gpu.is_idle?'空闲':'使用中'}</span></div><div class="gpu-name">${esc(gpu.name)}</div><div class="server-subtitle">${esc(key)}</div><div class="gpu-meta"><span>显存使用</span><span>${(used/1024).toFixed(1)} / ${(total/1024).toFixed(1)} GB</span></div><div class="bar"><i class="${used/total>.8?'high':''}" style="width:${Math.min(100,used/total*100)}%"></i></div><div class="gpu-metrics"><div><strong>${gpu.utilization_gpu||0}%</strong><small>GPU 利用率</small></div><div><strong>${gpu.temperature_c||0}°C</strong><small>温度</small></div><div><strong>${server.benchmarks?.[key]?.tensor_tflops?.toFixed(1)||'—'}</strong><small>实测 FP16 TFLOPS</small></div></div><div class="card-foot">${button('gpu-detail','进程与详情',`data-server="${server.id}" data-index="${gpu.index}"`,'small')}${button('gpu-mask',blocked?'恢复调度':'屏蔽调度',`data-server="${server.id}" data-key="${esc(key)}"`,'small')}</div></div>`;}
-function tasksTable(tasks,compact=false){if(!tasks.length)return empty('还没有实验','先创建项目，再配置任务、文件和前序依赖。');return `<div class="table-card"><table class="task-list-table ${compact?'compact-task-table':''}" aria-label="实验列表"><thead><tr><th>实验 / 项目</th><th>状态</th><th>调度策略</th><th>执行位置</th><th>优先级</th><th>操作</th></tr></thead><tbody>${tasks.map(t=>`<tr><td data-column="name"><a class="task-title" href="#project/${t.project_id}">#${t.seq} ${esc(t.name)}</a><small>${esc(projectBy(t.project_id)?.name||'')} · ${t.depends_on.length} 个前序</small></td><td data-column="status">${badge(t.status)}${taskDurationMarkup(t)}<small title="${esc(t.reason)}">${esc(t.reason|| (t.synced_at?'已校验并回传本机':''))}</small></td><td data-column="policy">${({'idle_only':'默认 · 空闲卡','low_interference':'低干扰 · 可共享','emergency':'紧急 · 可共享'})[t.level]}<small>显存门槛 ${t.memory_mb} MB</small></td><td data-column="location">${esc(serverBy(t.server_id)?.name||'自动选择')}<small>${t.gpu_index!=null&&t.server_id?'GPU '+t.gpu_index:'跨服务器调度'}</small></td><td data-column="priority">${t.priority}</td><td data-column="actions"><div class="actions">${button('task-detail','详情',`data-id="${t.id}"`,'small')}${['draft','paused','failed','canceled'].includes(t.status)?button('task-queue','入队',`data-id="${t.id}"`,'small'):''}${['queued','waiting','blocked'].includes(t.status)?button('task-pause','暂停',`data-id="${t.id}"`,'small'):''}${t.status==='sync_failed'?button('task-sync','重试回传',`data-id="${t.id}"`,'small'):''}</div></td></tr>`).join('')}</tbody></table></div>`;}
+function taskTableRow(task, compact) {
+  const id = `data-id="${esc(task.id)}"`;
+  const archived = !!task.archived && state.runtime_features?.task_archive;
+  let actions = button('task-detail','详情',id,'small');
+  if (!compact && state.runtime_features?.task_archive) {
+    actions += button('task-archive-one',archived?'恢复归档':'归档',id,'small task-archive-button');
+  }
+  actions += experimentButtons(task);
+  if (!archived && ['draft','paused','failed','canceled'].includes(task.status)) actions += button('task-queue','入队',id,'small');
+  if (!archived && dispatchQueueStatuses.has(task.status)) actions += button('task-pause','暂停排队',id,'small');
+  if (task.status === 'sync_failed') actions += button('task-sync','重试回传',id,'small');
+  const policy = ({idle_only:'默认 · 空闲卡',low_interference:'低干扰 · 可共享',emergency:'紧急 · 可共享'})[task.level];
+  return `<tr${archived?' class="task-is-archived"':''}>
+    ${compact?'':'<td class="scheduling-select-cell">'+schedulingCheckbox(task)+'</td>'}
+    <td data-column="name"><a class="task-title" href="#project/${esc(task.project_id)}">#${esc(task.seq)} ${esc(task.name)}</a><small>${esc(projectBy(task.project_id)?.name||'')} · ${task.depends_on.length} 个前序</small>${archived?'<span class="task-archive-tag">已归档</span>':''}</td>
+    <td data-column="status">${badge(task.status,runtimeLabel(task))}${taskDurationMarkup(task)}<small title="${esc(task.reason)}">${esc(task.reason||(task.synced_at?'已校验并回传本机':''))}</small></td>
+    <td data-column="policy">${policy}<small>显存门槛 ${esc(task.memory_mb)} MB</small></td>
+    <td data-column="location">${esc(serverBy(task.server_id)?.name||'自动选择')}<small>${task.gpu_index!=null&&task.server_id?'GPU '+esc(task.gpu_index):'跨服务器调度'}</small></td>
+    <td data-column="priority">${esc(task.priority)}</td><td data-column="actions"><div class="actions">${actions}</div></td>
+  </tr>`;
+}
+function tasksTable(tasks, compact=false) {
+  if (!tasks.length) return empty('还没有实验','先创建项目，再配置任务、文件和前序依赖。');
+  const selectAll = compact?'':'<th class="scheduling-select-cell"><input type="checkbox" class="scheduling-check" data-scheduling-all aria-label="选择本列表全部可编辑实验"></th>';
+  return `${compact?'':schedulingToolbar()}<div class="table-card"><table class="task-list-table ${compact?'compact-task-table':''}" aria-label="实验列表"><thead><tr>${selectAll}<th>实验 / 项目</th><th>状态</th><th>调度策略</th><th>执行位置</th><th>优先级</th><th>操作</th></tr></thead><tbody>${tasks.map(task=>taskTableRow(task,compact)).join('')}</tbody></table></div>`;
+}
 function overview() {
   const servers = state.servers || [];
   const devices = servers.filter(s => s.connected).flatMap(server =>
@@ -116,8 +154,42 @@ function setNavigation(section, title) {
 function render(){const [page,id]=route();const title={overview:'资源总览',projects:'项目空间',project:'项目空间',tasks:'实验队列',datasets:'数据集',servers:'服务器',settings:'调度设置',events:'操作记录'};
 setNavigation(page==='project'?'projects':(title[page]?page:'overview'),page==='project'?(projectBy(id)?.name||title.project):title[page]||'资源总览');let html=page==='projects'?projectsPage():page==='project'?projectPage(id):page==='tasks'?pageHead('实验队列','只有成功且完成回传的前序任务，才能解锁后续实验。',button('new-task','＋ 新建实验','','primary'))+tasksTable([...state.tasks].sort((a,b)=>a.priority-b.priority||a.seq-b.seq)):page==='servers'?serversPage():page==='datasets'?datasetsPage():page==='settings'?settingsPage():page==='events'?eventsPage():overview();if(state.settings.demo)html='<div class="notice warning">演示模式 · 以下资源和实验均为模拟数据，调度循环与 SSH 连接不会启动。</div>'+html;$('#main').innerHTML=html;}
 async function load(renderPage = true, polling = false) {
-  if (loading) return;
-  loading = true;
+  if (activeStateRead) {
+    if (polling) return activeStateRead.promise;
+    // A save or manual refresh needs a read started after that operation.
+    await activeStateRead.promise;
+    if (activeStateRead) {
+      activeStateRead.renderPage ||= renderPage;
+      return activeStateRead.promise;
+    }
+  }
+  const read = {renderPage, polling};
+  activeStateRead = read;
+  read.promise = readWorkspaceState(read).finally(() => {
+    activeStateRead = null;
+    lastStateReadAt = Date.now();
+  });
+  return read.promise;
+}
+function editingMain() {
+  return $('#main').contains(document.activeElement) && document.activeElement.matches('input,select,textarea');
+}
+function pollWorkspace() {
+  if (document.hidden || activeStateRead) return;
+  const interval = needsFastTransferPoll() ? 1000 : 5000;
+  if (Date.now() - lastStateReadAt >= interval) load(true, true);
+}
+function navigateWorkspace() {
+  projectTab = 'tasks';
+  if (initial) {
+    if (!activeStateRead) load();
+    return;
+  }
+  render();
+  lastPollSignature = pollPageSignature(state);
+  pollWorkspace();
+}
+async function readWorkspaceState(read) {
   const connection = $('#connection-state');
   try {
     state = await api('/api/state');
@@ -130,10 +202,13 @@ async function load(renderPage = true, polling = false) {
       jobStatuses.set(job.id, job.status);
     }
     initial = false;
+    const renderPage = read.renderPage && (!read.polling || !editingMain());
     const signature = renderPage ? pollPageSignature(state) : null;
-    if (renderPage && (!polling || signature === null || signature !== lastPollSignature)) {
+    if (renderPage && (!read.polling || signature === null || signature !== lastPollSignature)) {
       render();
       lastPollSignature = signature;
+    } else if (state.uploads.some(u => u.status === 'receiving') || $('#transfer-dock')?.hidden === false) {
+      renderTransferDock();
     }
     $('#scheduler-button').textContent = state.settings.paused ? '恢复调度' : '暂停调度';
     connection.dataset.state = 'online';
@@ -142,8 +217,6 @@ async function load(renderPage = true, polling = false) {
     if (connection.dataset.state !== 'offline') toast(error.message, true);
     connection.dataset.state = 'offline';
     connection.textContent = '连接中断';
-  } finally {
-    loading = false;
   }
 }
 async function serverForm(id){const context={revision:dialogRevision,route:route().join('/')};const s=serverBy(id)||{port:22,min_disk_gb:5,retention_days:7,enabled:true};let hosts=[];try{hosts=(await api('/api/ssh-config')).hosts;}catch(e){toast(e.message,true);}if(context.revision!==dialogRevision||context.route!==route().join('/'))return;window.sshHosts=hosts;modal(id?'编辑服务器':'添加服务器',`<form id="server-form" data-id="${id||''}"><div class="form-grid"><label class="full">从本机 SSH 配置导入<select name="ssh_alias"><option value="">选择 ~/.ssh/config 中的连接</option>${hosts.map((h,i)=>`<option value="${i}">${esc(h.alias)} · ${esc(h.host)}</option>`).join('')}</select></label>${field('显示名称','name',s.name)}${field('主机 / IP','host',s.host)}${field('SSH 端口','port',s.port,'number')}${field('用户名','username',s.username)}${field('私钥路径（控制器本机）','identity_file',s.identity_file)}${field('密码 / 私钥口令','password','','password')}${field('ProxyJump（可选）','proxy_jump',s.proxy_jump,'text','class="full"')}${field('运行根目录','work_root',s.work_root||'~/compute-work')}${field('数据根目录','data_root',s.data_root||'~/datasets')}${field('Conda 可执行文件（留空自动查找）','conda_executable',s.conda_executable)}${field('GPU 基准使用的 Conda 环境（可选）','benchmark_env',s.benchmark_env)}${field('磁盘最低可用空间（GB）','min_disk_gb',s.min_disk_gb,'number')}${field('闲置副本保留天数（0 为关闭）','retention_days',s.retention_days,'number')}<div class="full"><label class="checkbox"><input type="checkbox" name="enabled" ${s.enabled?'checked':''}>保存后自动连接和监测</label><label class="checkbox"><input type="checkbox" name="remember_password">将密码存入本机系统密钥环（不写入数据库）</label><label class="checkbox"><input type="checkbox" name="trust_new_host" ${s.trust_new_host?'checked':''}>信任首次出现的主机指纹；变更指纹仍拒绝连接</label><small class="muted">默认校验 known_hosts。未知主机会显示指纹；核实后可启用首次信任。运行中的服务器不能修改连接或目录。</small></div></div>${footer('保存服务器')}</form>`,'server');}
@@ -155,5 +228,12 @@ async function logLoad(id){try{const data=await api(`/api/tasks/${id}/log`);if($
 async function handleAction(el){const a=el.dataset.action,id=el.dataset.id,project=el.dataset.project,task=el.dataset.task,server=el.dataset.server;switch(a){case'close-dialog':$('#dialog').close();dialogKind='';break;case'refresh':location.reload();break;case'toggle-scheduler':await api('/api/settings',{paused:!state.settings.paused});await load();break;case'new-server':await serverForm();break;case'edit-server':await serverForm(id);break;case'new-project':modal('新建项目',`<form id="project-form"><div class="form-grid">${field('项目名称','name','','text','class="full"')}<label class="full">项目说明<textarea name="description" placeholder="记录研究目标、代码用途或实验计划"></textarea></label></div>${footer('创建项目')}</form>`,'project');break;case'new-task':taskForm(project);break;case'edit-task':taskForm(state.tasks.find(t=>t.id===id).project_id,id);break;case'project-tab':projectTab=el.dataset.tab;render();break;case'upload-files':uploadForm(project,task);break;case'browse-files':await fileBrowser(project,task);break;case'new-file':case'edit-file':{let path=el.dataset.path||'',text='';if(path)text=(await api(`/api/projects/${project}/file?path=${encodeURIComponent(path)}${task?'&task_id='+task:''}`)).text;modal(path||'新建文本文件',`<form id="editor-form" data-project="${project}" data-task="${task||''}">${field('相对文件路径','path',path)}<label style="margin-top:15px">UTF-8 文本内容<textarea name="text" class="code" style="min-height:350px">${esc(text)}</textarea></label>${footer('保存文件')}</form>`,'editor');break;}case'task-detail':await taskDetail(id);break;case'task-log':await logLoad(id);break;case'task-queue':case'task-pause':case'task-sync':case'task-retry':case'task-cancel':{const action={'task-queue':'queue','task-pause':'pause','task-sync':'sync','task-retry':'retry','task-cancel':'cancel'}[a];if(action==='cancel'||action==='retry'){modal(action==='cancel'?'取消实验':'重新执行实验',`<p>${action==='cancel'?'将终止远程实验进程组，随后回传已生成文件。':'将创建新的运行目录，并保留原有运行文件。已成功执行的后续任务会阻止重试。'}</p>${button('confirm-task','确认',`data-id="${id}" data-operation="${action}"`,'primary')}`,'confirm');}else{const result=await api(`/api/tasks/${id}/action`,{action});toast(result.label?'操作已加入后台队列':'任务已更新');await load();}break;}case'confirm-task':await api(`/api/tasks/${id}/action`,{action:el.dataset.operation});closeDialogFor(el);await load();break;case'connect-server':case'server-pause':case'server-enable':await api(`/api/servers/${id}/action`,{action:{'connect-server':'connect','server-pause':'pause','server-enable':'enable'}[a]});toast('服务器操作已提交');await load();break;case'gpu-mask':await api(`/api/servers/${server}/action`,{action:'gpu',gpu_uuid:el.dataset.key});await load();break;case'gpu-detail':{const s=serverBy(server),g=s.snapshot.gpus.find(g=>g.index===Number(el.dataset.index));modal(g.name,`<p class="server-subtitle">${esc(s.name)} · GPU ${g.index} · ${esc(g.uuid)}</p><div class="info-grid"><div><small>可用显存</small>${g.memory_free_mb} MB</div><div><small>功耗 / 利用率</small>${g.power_draw_w??'—'} W / ${g.utilization_gpu}%</div></div><h3>计算进程</h3>${(g.processes||[]).map(p=>`<div class="card" style="margin:10px 0"><b>PID ${p.pid} · ${esc(p.user||'')}</b><p>${p.memory_mb??'—'} MB · ${p.runtime_seconds??'—'} 秒</p><code class="break">${esc(p.command||p.process_name||p.name)}</code></div>`).join('')||'<p class="muted">无可见计算进程</p>'}${button('benchmark','运行算力基准（空闲卡）',`data-server="${server}" data-index="${g.index}"`)}`,'gpu');break;}case'benchmark':await api(`/api/servers/${server}/action`,{action:'benchmark',gpu_index:Number(el.dataset.index)});toast('基准测试已加入后台队列');break;case'scan':await api(`/api/projects/${project}/scan`,{server_id:server});toast('文件核验已加入后台队列');break;case'replica-files':{const r=await api(`/api/projects/${project}/replicas/${server}`);modal('远程文件清单',`<p class="muted">核验 ${fmt(r.checked_at)} · ${Object.keys(r.files).length} 个文件</p><h3>公共代码差异</h3>${r.differences.map(d=>`<p class="code">${esc(d.path)} · ${esc(d.state)}</p>`).join('')||'<p class="muted">hash 一致</p>'}<div class="file-list">${Object.entries(r.files).map(([p,v])=>`<div class="file-row"><span>${esc(p)}<br><code>${v.sha256}</code></span><span>${size(v.size)}</span></div>`).join('')}</div>`,'replica');break;}case'clean-all':case'clean-one':modal('清理远程项目副本',`<p>将删除${a==='clean-all'?'所有已配置服务器':esc(serverBy(server)?.name)}上的此项目代码和运行副本。本机文件与数据集保留。</p><p class="muted">存在运行、回传或状态未知的实验时，后台会拒绝清理。</p>${button('confirm-clean','确认清理',`data-project="${project}" data-server="${server||''}"`,'danger')}`,'confirm');break;case'confirm-clean':await api(`/api/projects/${project}/clean`,{server_ids:server?[server]:null});closeDialogFor(el);toast('清理操作已提交');break;case'new-dataset':modal('上传数据集',`<form id="dataset-form" enctype="multipart/form-data">${field('数据集名称（目标文件夹名）','name')}<label style="margin-top:15px">ZIP 数据文件<input name="archive" type="file" accept=".zip" required></label><p class="muted">ZIP 根目录即数据集目录。自动探测共享存储，按 hash 增量上传到所有配置服务器。已有不同内容的同名数据将拒绝覆盖。</p>${footer('导入并同步到服务器')}</form>`,'dataset');break;case'dataset-retry':await api(`/api/datasets/${id}/upload`,{});toast('数据集同步已加入后台队列');break;case'artifacts':{const t=state.tasks.find(t=>t.id===id);const attempts=[...(t.previous_attempts||[]).map(a=>a.attempt_id),...(t.attempt_id?[t.attempt_id]:[])];modal('本机结果文件',`<label>运行 ID<select id="artifact-attempt" data-task="${id}">${attempts.map(a=>`<option value="${a}" ${a===t.attempt_id?'selected':''}>${a}</option>`).join('')}</select></label><div id="artifact-files"></div>`,'artifacts');if(attempts.length)await artifactFiles(id,$('#artifact-attempt').value);break;}}}
 async function artifactFiles(id,attempt){const target=$('#artifact-files');if(!target)return;const seq=Number(target.dataset.seq||0)+1;target.dataset.seq=seq;try{const r=await api(`/api/tasks/${id}/artifacts?attempt_id=${attempt}`);if(!target.isConnected||Number(target.dataset.seq)!==seq)return;target.innerHTML=`<p class="server-subtitle">${esc(r.local_path)}</p><div class="file-list">${Object.entries(r.files).map(([p,v])=>`<div class="file-row"><span>${esc(p)}<br><code>${v.sha256.slice(0,16)}… · ${size(v.size)}</code></span><a href="/api/tasks/${id}/artifacts?attempt_id=${attempt}&path=${encodeURIComponent(p)}">下载</a></div>`).join('')||'<p class="muted">结果尚未回传</p>'}</div>`;}catch(e){if(target.isConnected&&Number(target.dataset.seq)===seq)target.textContent=e.message;}}
 async function submitForm(form){const fd=new FormData(form),data=Object.fromEntries(fd.entries());if(form.id==='server-form'){data.enabled=fd.has('enabled');data.remember_password=fd.has('remember_password');data.trust_new_host=fd.has('trust_new_host');if(form.dataset.id)data.id=form.dataset.id;delete data.ssh_alias;await api('/api/servers',data);}else if(form.id==='project-form'){const p=await api('/api/projects',data);location.hash='project/'+p.id;}else if(form.id==='task-form'){data.depends_on=fd.getAll('depends_on');data.server_ids=fd.getAll('server_ids');data.datasets=data.datasets.split(/[,，]/).map(v=>v.trim()).filter(Boolean);if(form.dataset.task)await api(`/api/tasks/${form.dataset.task}/update`,data);else await api(`/api/projects/${data.project_id}/tasks`,data);}else if(form.id==='settings-form'){await api('/api/settings',data);toast('设置已保存');await load();return;}else if(form.id==='editor-form'){data.task_id=form.dataset.task||null;await api(`/api/projects/${form.dataset.project}/file`,data);}else if(form.id==='files-form'){const uploads=new FormData();const mode=data.mode==='zip'?'zip':'files';uploads.append('mode',mode);if(form.dataset.task)uploads.append('task_id',form.dataset.task);const files=$('input[type=file]',form).files;for(const f of files){uploads.append('files',f);const rel=f.webkitRelativePath?f.webkitRelativePath.split('/').slice(1).join('/'):f.name;uploads.append('paths',rel);}await api(`/api/projects/${form.dataset.project}/files`,uploads);}else if(form.id==='dataset-form'){toast('正在导入数据，完成后进入后台同步队列');await api('/api/datasets',fd);}closeDialogFor(form);toast('操作已保存');await load();}
-if(document.body.dataset.authorized==='false'){$('#login-form').addEventListener('submit',async e=>{e.preventDefault();try{await api('/login',{token:new FormData(e.target).get('token')});location.reload();}catch(error){$('#login-error').textContent=error.message;}});}else{document.addEventListener('click',async event=>{const el=event.target.closest('[data-action]');if(!el)return;event.preventDefault();const previouslyDisabled=el.disabled;el.dataset.pending='true';el.disabled=true;try{await handleAction(el);}catch(error){toast(error.message,true);}finally{delete el.dataset.pending;el.disabled=previouslyDisabled;}});document.addEventListener('submit',async event=>{if(!event.target.matches('form'))return;event.preventDefault();const btn=$('button[type=submit],button.primary',event.target);if(btn)btn.disabled=true;try{await submitForm(event.target);}catch(error){toast(error.message,true);}finally{if(btn)btn.disabled=btn.dataset.operationBusy==='true';}});document.addEventListener('change',async event=>{const el=event.target;if(el.name==='ssh_alias'&&el.value!==''){const h=window.sshHosts[Number(el.value)];if(h.unsupported_proxy_command){toast('此 SSH 条目使用 ProxyCommand，请改为 ProxyJump',true);return;}for(const k of ['name','host','username','port','identity_file','proxy_jump'])$(`[name="${k}"]`,el.form).value=h[k]|| (k==='name'?h.alias:'');}if(el.name==='project_id'&&el.form?.id==='task-form')$('[name="depends_on"]',el.form).innerHTML=state.tasks.filter(t=>t.project_id===el.value).map(t=>`<option value="${t.id}">#${t.seq} ${esc(t.name)}</option>`).join('');if(el.name==='mode'){const input=$('input[type=file]',el.form);input.value='';input.toggleAttribute('webkitdirectory',el.value==='directory');input.multiple=el.value!=='zip';input.accept=el.value==='zip'?'.zip':'';}if(el.id==='artifact-attempt')await artifactFiles(el.dataset.task,el.value);});window.addEventListener('hashchange',()=>{projectTab='tasks';load();});$('#dialog').addEventListener('close',()=>{if(!$('#dialog').open){dialogRevision++;dialogKind='';}});window.addEventListener('DOMContentLoaded',()=>load(),{once:true});setInterval(()=>{const editing=$('#main').contains(document.activeElement)&&document.activeElement.matches('input,select,textarea');load(!editing,true);if($('#dialog').open&&dialogKind==='task-detail'&&selectedTask)logLoad(selectedTask);},5000);}
+if(document.body.dataset.authorized==='false'){$('#login-form').addEventListener('submit',async e=>{e.preventDefault();try{await api('/login',{token:new FormData(e.target).get('token')});location.reload();}catch(error){$('#login-error').textContent=error.message;}});}else{document.addEventListener('click',async event=>{const el=event.target.closest('[data-action]');if(!el)return;event.preventDefault();const previouslyDisabled=el.disabled;el.dataset.pending='true';el.disabled=true;try{await handleAction(el);}catch(error){toast(error.message,true);}finally{delete el.dataset.pending;el.disabled=previouslyDisabled;}});document.addEventListener('submit',async event=>{if(!event.target.matches('form'))return;event.preventDefault();const btn=$('button[type=submit],button.primary',event.target);if(btn)btn.disabled=true;try{await submitForm(event.target);}catch(error){toast(error.message,true);}finally{if(btn)btn.disabled=btn.dataset.operationBusy==='true';}});document.addEventListener('change',async event=>{const el=event.target;if(el.name==='ssh_alias'&&el.value!==''){const h=window.sshHosts[Number(el.value)];if(h.unsupported_proxy_command){toast('此 SSH 条目使用 ProxyCommand，请改为 ProxyJump',true);return;}for(const k of ['name','host','username','port','identity_file','proxy_jump'])$(`[name="${k}"]`,el.form).value=h[k]|| (k==='name'?h.alias:'');}if(el.name==='project_id'&&el.form?.id==='task-form')$('[name="depends_on"]',el.form).innerHTML=state.tasks.filter(t=>t.project_id===el.value).map(t=>`<option value="${t.id}">#${t.seq} ${esc(t.name)}</option>`).join('');if(el.name==='mode'){const input=$('input[type=file]',el.form);input.value='';input.toggleAttribute('webkitdirectory',el.value==='directory');input.multiple=el.value!=='zip';input.accept=el.value==='zip'?'.zip':'';}if(el.id==='artifact-attempt')await artifactFiles(el.dataset.task,el.value);});
+  window.addEventListener('hashchange', navigateWorkspace);
+  $('#dialog').addEventListener('close',()=>{if(!$('#dialog').open){dialogRevision++;dialogKind='';}});
+  window.addEventListener('DOMContentLoaded',()=>load(),{once:true});
+  document.addEventListener('visibilitychange',pollWorkspace);
+  setInterval(pollWorkspace,1000);
+  setInterval(()=>{if(!document.hidden&&$('#dialog').open&&dialogKind==='task-detail'&&selectedTask)logLoad(selectedTask);},5000);
+}
 

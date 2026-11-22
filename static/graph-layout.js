@@ -34,15 +34,22 @@ function layoutTasks(tasks, columns=3, geometry={}) {
   const edges=order.flatMap(n=>(n.depends_on||[]).filter(id=>map.has(id)).map(id=>({source:id,target:n.id,secondary:(n.depends_on||[]).some(other=>other!==id&&parentSet(other).has(id))})));
   // Keep a branch aligned through successive ranks. Isotonic projection
   // preserves node order and minimum spacing while centering forks/merges.
-  const primary=edges.filter(e=>!e.secondary),spacing=nodeWidth+gapX;
-  function align(group,parents){
-    const desired=group.map((n,i)=>{const peers=primary.filter(e=>e[parents?'target':'source']===n.id).map(e=>placed.get(e[parents?'source':'target']));return {value:(peers.length?peers.reduce((s,p)=>s+p.x-axis,0)/peers.length:n.x-axis)-i*spacing,count:1,start:i,end:i};});
+  const parentsByNode=new Map(),childrenByNode=new Map(),spacing=nodeWidth+gapX;
+  for(const edge of edges){
+    if(edge.secondary)continue;
+    if(!parentsByNode.has(edge.target))parentsByNode.set(edge.target,[]);
+    if(!childrenByNode.has(edge.source))childrenByNode.set(edge.source,[]);
+    parentsByNode.get(edge.target).push(placed.get(edge.source));
+    childrenByNode.get(edge.source).push(placed.get(edge.target));
+  }
+  function align(group,neighbors){
+    const desired=group.map((n,i)=>{const peers=neighbors.get(n.id)||[];return {value:(peers.length?peers.reduce((s,p)=>s+p.x-axis,0)/peers.length:n.x-axis)-i*spacing,count:1,start:i,end:i};});
     const blocks=[];for(const point of desired){blocks.push(point);while(blocks.length>1&&blocks.at(-2).value>blocks.at(-1).value){const b=blocks.pop(),a=blocks.pop(),count=a.count+b.count;blocks.push({value:(a.value*a.count+b.value*b.count)/count,count,start:a.start,end:b.end});}}
     for(const block of blocks)for(let i=block.start;i<=block.end;i++)group[i].x=axis+i*spacing+Math.max(0,Math.min((widest-group.length)*spacing,block.value));
   }
   for(let pass=0;pass<5;pass++){
-    for(const row of [...occupied].reverse())align(rows.get(row),false);
-    for(const row of occupied)align(rows.get(row),true);
+    for(const row of [...occupied].reverse())align(rows.get(row),childrenByNode);
+    for(const row of occupied)align(rows.get(row),parentsByNode);
   }
   if(orientation==='horizontal')for(const item of order){const cross=(item.x-axis)/(nodeWidth+gapX);item.x=axis+item.row*(nodeWidth+gapX);item.y=top+cross*(nodeHeight+gapY);}
   return {nodes:order,edges,nodeWidth,nodeHeight,orientation,maxParallel:widest,width:axis+Math.max(0,(orientation==='horizontal'?occupied.length:widest)*(nodeWidth+gapX)-gapX)+32,height:top+Math.max(0,(orientation==='horizontal'?widest:occupied.length)*(nodeHeight+gapY)-gapY)+30,rows:occupied.map((row,i)=>[i,rows.get(row)])};
@@ -71,8 +78,19 @@ function routeTaskEdges(graph,edges){
   const rects=[...nodes.values()].map(n=>({left:n.x-6,right:n.x+w+6,top:n.y-6,bottom:n.y+h+6}));
   const xs=[...new Set([10,...rects.flatMap(r=>[r.left-3,r.right+3]),(horizontal?graph.height:graph.width)-10])].sort((a,b)=>a-b);
   const ys=[...new Set([...nodes.values()].flatMap(n=>[n.y-12,n.y+h+12]))].sort((a,b)=>a-b);
-  const tracks=[];
-  const clear=(a,b)=>!rects.some(r=>a[0]===b[0]?a[0]>r.left&&a[0]<r.right&&Math.max(a[1],b[1])>r.top&&Math.min(a[1],b[1])<r.bottom:a[1]>r.top&&a[1]<r.bottom&&Math.max(a[0],b[0])>r.left&&Math.min(a[0],b[0])<r.right);
+  const tracks=[], verticalObstacles=new Map(), horizontalObstacles=new Map();
+  function clear(a,b){
+    const vertical=a[0]===b[0],line=vertical?a[0]:a[1];
+    const cache=vertical?verticalObstacles:horizontalObstacles;
+    if(!cache.has(line)){
+      cache.set(line,vertical
+        ? rects.filter(r=>line>r.left&&line<r.right).map(r=>[r.top,r.bottom])
+        : rects.filter(r=>line>r.top&&line<r.bottom).map(r=>[r.left,r.right]));
+    }
+    const from=vertical?a[1]:a[0],to=vertical?b[1]:b[0];
+    const low=Math.min(from,to),high=Math.max(from,to);
+    return !cache.get(line).some(([start,end])=>high>start&&low<end);
+  }
   const routed=edges.map(edge=>{
     const source=nodes.get(edge.source),target=nodes.get(edge.target),sx=source.x+edge.sourceOffset,sy=source.y+h,tx=target.x+edge.targetOffset,ty=target.y;
     let points;
@@ -84,16 +102,25 @@ function routeTaskEdges(graph,edges){
     }else{
       const start=[sx,sy+12],end=[tx,ty-12],gx=[...new Set([...xs,sx,tx])].sort((a,b)=>a-b),gy=ys.filter(y=>y>=start[1]&&y<=end[1]);
       if(!gy.includes(start[1]))gy.push(start[1]);if(!gy.includes(end[1]))gy.push(end[1]);gy.sort((a,b)=>a-b);
-      const startX=gx.indexOf(sx),startY=gy.indexOf(start[1]),endX=gx.indexOf(tx),endY=gy.indexOf(end[1]),queue=[{x:startX,y:startY,dir:1,cost:0,path:[start]}],seen=new Map();let found=null;
+      const startX=gx.indexOf(sx),startY=gy.indexOf(start[1]),endX=gx.indexOf(tx),endY=gy.indexOf(end[1]);
+      const queue=[{x:startX,y:startY,dir:1,cost:0,estimate:0,parent:null}],seen=new Map();let found=null;
       while(queue.length){
-        queue.sort((a,b)=>b.cost-a.cost);const current=queue.pop(),key=current.x+','+current.y+','+current.dir;
+        // Manhattan distance bounds the remaining path length on this orthogonal grid.
+        queue.sort((a,b)=>b.estimate-a.estimate||a.cost-b.cost);const current=queue.pop(),key=current.x+','+current.y+','+current.dir;
         if((seen.get(key)??Infinity)<=current.cost)continue;seen.set(key,current.cost);
-        if(current.x===endX&&current.y===endY){found=current.path;break;}
+        if(current.x===endX&&current.y===endY){
+          found=[];
+          for(let step=current;step;step=step.parent)found.push([gx[step.x],gy[step.y]]);
+          found.reverse();break;
+        }
         for(const [dx,dy,dir] of [[1,0,0],[-1,0,0],[0,1,1]]){
           const x=current.x+dx,y=current.y+dy;if(x<0||x>=gx.length||y>=gy.length)continue;
           const a=[gx[current.x],gy[current.y]],b=[gx[x],gy[y]];if(!clear(a,b))continue;
           const cost=current.cost+Math.abs(b[0]-a[0])+Math.abs(b[1]-a[1])+(dir===current.dir?0:22);
-          if((seen.get(x+','+y+','+dir)??Infinity)>cost)queue.push({x,y,dir,cost,path:[...current.path,b]});
+          if((seen.get(x+','+y+','+dir)??Infinity)>cost){
+            const estimate=cost+Math.abs(tx-b[0])+Math.abs(end[1]-b[1]);
+            queue.push({x,y,dir,cost,estimate,parent:current});
+          }
         }
       }
       if(!found){const lane=(horizontal?graph.height:graph.width)-10;found=[start,[lane,start[1]],[lane,end[1]],end];}

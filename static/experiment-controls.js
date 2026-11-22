@@ -1,6 +1,6 @@
 'use strict';
 labels.suspended='运行已暂停';labels.canceled='已中断';colors.suspended='amber';
-const controlBaseTable=tasksTable,controlBaseDetail=taskDetail,controlBaseAction=handleAction;
+const controlBaseDetail=taskDetail,controlBaseAction=handleAction;
 function experimentButtons(t,detail=false){
   if(t.archived)return '';
   const id=`data-id="${esc(t.id)}"`;
@@ -12,11 +12,6 @@ function experimentButtons(t,detail=false){
   if(['draft','paused','queued','waiting','blocked','staging','launching','running','suspended','canceling'].includes(t.status))html+=button('task-cancel',t.status==='canceling'?'正在中断…':'中断整个实验',id+(t.status==='canceling'?' disabled':''),'small danger');
   return html;
 }
-tasksTable=function(tasks,compact){
-  let html=controlBaseTable(tasks,compact);
-  for(const t of tasks){const mark=button('task-detail','详情',`data-id="${t.id}"`,'small');html=html.replace(mark,mark+experimentButtons(t));if(['queued','waiting','blocked'].includes(t.status))html=html.replace(button('task-pause','暂停',`data-id="${t.id}"`,'small'),button('task-pause','暂停排队',`data-id="${t.id}"`,'small'));}
-  return html;
-};
 function refreshExperimentControls(){
   if(dialogKind!=='task-detail'||!$('#dialog').open)return;
   const task=state.tasks.find(t=>t.id===selectedTask),group=$('[data-experiment-controls]');if(!task||!group)return;

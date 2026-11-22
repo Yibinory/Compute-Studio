@@ -12,8 +12,6 @@ api=async function(path,data,method){
   if(/^\/api\/tasks\/[^/]+\/action$/.test(path)&&state.tasks){const task=result.task||(result.project_id?result:null);if(task){const index=state.tasks.findIndex(t=>t.id===task.id);if(index>=0){state.tasks[index]={...state.tasks[index],...task};render();}}}
   return result;
 };
-const runtimeBaseTable=tasksTable;
-tasksTable=function(tasks,compact){let i=0;return runtimeBaseTable(tasks,compact).replace(/<tbody>([\s\S]*?)<\/tbody>/,(_,body)=>'<tbody>'+body.replace(/<tr>[\s\S]*?<\/tr>/g,row=>{const task=tasks[i++];return row.replace(badge(task.status),badge(task.status,runtimeLabel(task)));})+'</tbody>');};
 function refreshRuntimePanel(){
   if(!$('#dialog').open||dialogKind!=='task-detail')return;
   const task=state.tasks.find(t=>t.id===selectedTask);if(!task)return;

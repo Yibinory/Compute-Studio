@@ -11,12 +11,9 @@ function schedulingReconcile(){
 function schedulingCheckbox(task,dialog=false){const eligible=!task.archived&&schedulingStatuses.has(task.status),selected=dialog?schedulingDraft?.ids:schedulingSelection;
   return `<input type="checkbox" class="scheduling-check" data-scheduling-${dialog?'draft':'select'}="${esc(task.id)}" aria-label="选择 ${esc(task.name)}" ${selected?.has(task.id)?'checked':''} ${eligible?'':'disabled'} title="${eligible?'选择此实验':'此状态已执行，不能修改调度策略'}">`;
 }
-const schedulingBaseTable=tasksTable;
-tasksTable=function(tasks,compact=false){
-  const html=schedulingBaseTable(tasks,compact);if(compact||!tasks.length)return html;schedulingReconcile();let i=0;
-  return `<div class="scheduling-toolbar"><span>已选 <b data-scheduling-count>${schedulingSelection.size}</b> 个实验</span>${state.runtime_features?.batch_queue?button('content-selected-queue','所选入队','','small primary'):''}${button('bulk-scheduling','修改所选策略','','small')}${button('scheduling-clear','清空选择','','small')}<small>失败／中断实验仅可改环境</small></div>`+
-    html.replace('<thead><tr>','<thead><tr><th class="scheduling-select-cell"><input type="checkbox" class="scheduling-check" data-scheduling-all aria-label="选择本列表全部可编辑实验"></th>').replace(/<tbody>([\s\S]*?)<\/tbody>/,(_,body)=>'<tbody>'+body.replace(/<tr>/g,()=>'<tr><td class="scheduling-select-cell">'+schedulingCheckbox(tasks[i++])+'</td>')+'</tbody>');
-};
+function schedulingToolbar(){
+  return `<div class="scheduling-toolbar"><span>已选 <b data-scheduling-count>${schedulingSelection.size}</b> 个实验</span>${state.runtime_features?.batch_queue?button('content-selected-queue','所选入队','','small primary'):''}${button('bulk-scheduling','修改所选策略','','small')}${button('scheduling-clear','清空选择','','small')}<small>失败／中断实验仅可改环境</small></div>`;
+}
 function schedulingRefreshSelection(){
   const tasks=schedulingTasks().filter(t=>schedulingStatuses.has(t.status)),all=$('[data-scheduling-all]');
   if(all){all.checked=tasks.length>0&&tasks.every(t=>schedulingSelection.has(t.id));all.indeterminate=tasks.some(t=>schedulingSelection.has(t.id))&&!all.checked;all.disabled=!tasks.length;}

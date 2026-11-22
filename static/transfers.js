@@ -70,8 +70,11 @@ sendChunk=async function(upload,index,offset,block,base){
     xhr.onerror=()=>reject(Error('上传连接中断'));xhr.onabort=()=>reject(Error('传输已中断'));xhr.send(block);
   });
 };
-if(document.body.dataset.authorized==='true')setInterval(()=>{
-  if((state.uploads||[]).some(u=>transferActive.includes(u.status))||(state.jobs||[]).some(j=>j.status==='running'&&j.cancelable)||state.local_storage?.migrating){
-    const editing=$('#main')?.contains(document.activeElement)&&document.activeElement.matches('input,select,textarea');load(!editing);
-  }
-},1000);
+function needsFastTransferPoll(){
+  const page=route()[0];
+  if(page==='settings')return state.local_storage?.migrating;
+  if(!['uploads','datasets','dataset','events'].includes(page))return false;
+  return (state.uploads||[]).some(u=>transferActive.includes(u.status)) ||
+    (state.jobs||[]).some(j=>j.status==='running'&&j.cancelable ||
+      j.operation?.startsWith('delete_dataset:')&&['queued','running'].includes(j.status));
+}

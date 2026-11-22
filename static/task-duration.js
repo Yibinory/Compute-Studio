@@ -15,11 +15,22 @@ function taskDuration(task,now=Date.now()/1000){
 }
 function taskDurationMarkup(task){
   const value=taskDuration(task);
-  return `<span class="task-duration" data-task-duration="${esc(task.id)}" title="${esc(value.title)}">${esc(value.text)}</span>`;
+  return `<span class="task-duration" data-task-duration="${esc(task.id)}" ${value.live?'data-duration-live':''} title="${esc(value.title)}">${esc(value.text)}</span>`;
 }
+let lastDurationTasks;
 if(typeof document!=='undefined')setInterval(()=>{
-  if(document.hidden||typeof state==='undefined')return;
-  const tasks=new Map((state.tasks||[]).map(t=>[t.id,t]));
-  document.querySelectorAll('[data-task-duration]').forEach(el=>{const task=tasks.get(el.dataset.taskDuration);if(!task)return;const value=taskDuration(task);if(el.textContent!==value.text)el.textContent=value.text;if(el.title!==value.title)el.title=value.title;});
+  if(document.hidden||typeof state==='undefined'||!state.tasks)return;
+  const changed=lastDurationTasks!==state.tasks;
+  lastDurationTasks=state.tasks;
+  const timers=document.querySelectorAll(changed?'[data-task-duration]':'[data-duration-live]');
+  if(!timers.length)return;
+  const tasks=new Map(state.tasks.map(t=>[t.id,t]));
+  for(const el of timers){
+    const task=tasks.get(el.dataset.taskDuration);if(!task)continue;
+    const value=taskDuration(task);
+    el.toggleAttribute('data-duration-live',!!value.live);
+    if(el.textContent!==value.text)el.textContent=value.text;
+    if(el.title!==value.title)el.title=value.title;
+  }
 },1000);
 if(typeof module!=='undefined')module.exports={taskDuration,formatTaskDuration};
