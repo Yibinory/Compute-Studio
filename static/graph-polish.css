@@ -1,32 +1,110 @@
-/* A quiet canvas: status is an accent, while names remain high contrast. */
-.schedule-board.flow-board{border-radius:16px;box-shadow:0 8px 28px #253c5906}
-.flow-board .graph-scroll{background-color:#f7f9fc;background-image:radial-gradient(#c8d4e440 .7px,transparent .7px);background-size:18px 18px;max-height:660px;padding:14px 10px}
-.flow-board-header{gap:14px}.flow-board-header>div:first-child{min-width:180px}.flow-controls{gap:7px;flex-wrap:wrap;justify-content:flex-end}
-.flow-board .flow-node{--node-accent:#92a1b7;--node-tint:#f0f3f7}
-.schedule-board.flow-board .flow-node{background:#fff!important;border:1px solid #dce4ef!important;border-left:3px solid var(--node-accent)!important;border-radius:11px;padding:11px 13px 9px;box-shadow:0 3px 10px #29436a06}
-.flow-board .flow-node.complete{--node-accent:#2caa85;--node-tint:#eaf7f1}.flow-board .flow-node.running{--node-accent:#657ade;--node-tint:#edf0ff}.flow-board .flow-node.waiting{--node-accent:#c99b4b;--node-tint:#fcf5e8}.flow-board .flow-node.failed{--node-accent:#d1687c;--node-tint:#fff0f3}.flow-board .flow-node.canceled{--node-accent:#a1aabb}
-.flow-node-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px}
-.flow-sequence{font-size:9px;color:#96a6bc;letter-spacing:.4px;font-variant-numeric:tabular-nums}
-.flow-board .flow-status-text{display:flex;align-items:center;gap:5px;color:var(--node-accent);background:var(--node-tint);padding:3px 6px;border-radius:5px;font-size:9px;line-height:1.1}
-.flow-board .flow-status-dot{width:4px;height:4px;background:var(--node-accent)!important}
-.flow-board .flow-node-name{min-height:34px;flex:1;align-items:flex-start}
-.flow-board .flow-node .node-title{color:#344660!important;font-size:12px;line-height:17px;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;min-height:0;max-height:34px;font-weight:600}
-.flow-board .flow-node .node-title:hover{color:#536ad1!important}
-.flow-board .flow-node .node-footer{border-top:1px solid #f0f3f8;padding-top:6px;margin-top:7px;gap:8px;min-height:16px}
-.flow-location{color:#9caac0;font-size:8px;min-width:0;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
-.flow-board .node-actions{gap:9px}.flow-board .flow-node .node-footer button{font-size:9px;min-height:15px;color:#8294b1}
-.flow-board .graph-edge,.flow-board .graph-edge.done{stroke:#b0bdce;stroke-width:1.1;opacity:.85}
-.flow-board.show-all-edges .graph-edge.secondary{stroke:#c2ccd9;opacity:.45;stroke-dasharray:3 4}
-.flow-board .graph-edge.secondary{opacity:0}.flow-board .graph-edge.error{stroke:#d18b99}
-.flow-board .highlighting .graph-edge{opacity:.1}.flow-board .highlighting .graph-edge.highlighted{stroke:#6a81c4;stroke-width:1.8;opacity:1;stroke-dasharray:none}
-.flow-board .highlighting .graph-node:not(.related){opacity:.45}.flow-board .flow-port{opacity:0!important}
-.flow-board .highlighting .flow-port.highlighted{opacity:1!important;background:#7d95ce;border-color:#7d95ce}
-.flow-board .flow-node:hover,.flow-board .flow-node:focus-within{box-shadow:0 5px 16px #36568b15;border-color:#aebfe0!important}
-.flow-board .schedule-zoom{white-space:nowrap}.flow-board .graph-fit-button.active{background:#edf2fd;color:#536dc2;border-color:#d8e2f6}
-.flow-overview{border-bottom:1px solid #e9edf5}.schedule-foot{background:#fff}
-.graph-component-picker{display:flex;align-items:center;gap:6px;font-size:10px;color:#8b9bb3;min-width:0}
-.graph-component-picker select{max-width:185px;min-height:33px;padding:5px 22px 5px 8px!important;font-size:10px!important;white-space:nowrap;text-overflow:ellipsis;background:#fff}
-.flow-board .flow-node .node-title{font-size:calc(12px * var(--graph-text-boost,1));line-height:calc(17px * var(--graph-text-boost,1));max-height:calc(34px * var(--graph-text-boost,1))}
-.flow-board .flow-status-text,.flow-sequence,.flow-board .flow-node .node-footer button{font-size:calc(9px * var(--graph-text-boost,1))}
-.flow-location{font-size:calc(8px * var(--graph-text-boost,1))}
-@media(max-width:700px){.flow-controls{justify-content:flex-start}.flow-board .graph-scroll{padding:12px 0}.flow-board-header>div:first-child{min-width:0}.flow-board .graph-fit-button{font-size:10px}}
+/* The canvas scrolls at reading scale; fitting the full graph is an explicit choice. */
+.schedule-board.flow-board {
+  min-width: 0;
+  border: 1px solid #d9e2ed;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 4px 18px #23395508;
+}
+.flow-board .flow-board-header { gap: 14px; padding: 16px 18px 12px; }
+.flow-board-header strong { color: #243750; font-size: 16px; }
+.flow-board-header strong small, .flow-board-header > div:first-child > span { color: #60748e; font-size: 11px; }
+.graph-locator, .flow-board-toolbar, .graph-scale-controls { display: flex; align-items: center; gap: 8px; }
+.graph-locator { min-width: 0; }
+.graph-locator input { width: 210px; min-width: 0; min-height: 34px; font-size: 12px; }
+.graph-locator button { white-space: nowrap; }
+.flow-board-toolbar { padding: 0 18px 12px; justify-content: space-between; flex-wrap: wrap; }
+.flow-board-toolbar .flow-controls { width: auto; justify-content: flex-start; }
+.flow-layout-switch button, .graph-component-picker, .graph-fit-button, .flow-controls .flow-edge-toggle { font-size: 11px; }
+.graph-scale-controls { margin-left: auto; flex-shrink: 0; }
+.flow-board .graph-fit-button.active { background: #eaf1ff; color: #254e98; border-color: #b8cae8; }
+.graph-component-picker { display: flex; align-items: center; gap: 6px; color: #5f738c; min-width: 0; }
+.graph-component-picker select { max-width: 180px; font-size: 11px; min-height: 33px; }
+.flow-board .flow-overview { padding: 9px 18px; background: #f8fafc; border-block: 1px solid #e3e9f1; color: #566b83; }
+.flow-overview .schedule-count, .flow-overview > span { font-size: 11px; }
+.flow-board .graph-scroll {
+  position: relative;
+  display: block;
+  padding: 0;
+  max-height: min(68vh, 680px);
+  background: radial-gradient(circle, #ced9e6 0.8px, transparent 1px) 0 0 / 18px 18px #f4f7fb;
+  scrollbar-color: #a7b9cf #edf2f8;
+}
+.flow-board.horizontal .graph-scroll { display: block; }
+.flow-board .graph-scroll.can-pan { cursor: grab; }
+.flow-board .graph-scroll[data-mouse-pan] { user-select: none; }
+.flow-board .graph-scroll[data-mouse-pan="dragging"],
+.flow-board .graph-scroll[data-mouse-pan="dragging"] * { cursor: grabbing; }
+.graph-pan-hint { display: none; }
+@media (hover: hover) and (pointer: fine) {
+  .flow-board:has(.graph-scroll.can-pan) .graph-pan-hint { display: block; font-weight: 600; }
+}
+.flow-board .schedule-scaled-space { overflow: clip; }
+.flow-board .flow-node { --node-accent: #7688a2; --node-ink: #455c78; --node-tint: #eef2f7; }
+.flow-board .flow-node.complete { --node-accent: #48977f; --node-ink: #236850; --node-tint: #e7f5ef; }
+.flow-board .flow-node.running { --node-accent: #577ed3; --node-ink: #315aa6; --node-tint: #eaf0ff; }
+.flow-board .flow-node.waiting { --node-accent: #c39141; --node-ink: #815817; --node-tint: #fcf3df; }
+.flow-board .flow-node.failed { --node-accent: #cd7380; --node-ink: #973a4a; --node-tint: #fbecef; }
+.flow-board .flow-node.canceled { --node-accent: #9099aa; --node-ink: #596578; --node-tint: #eef1f5; }
+.schedule-board.flow-board .schedule-node.flow-node {
+  padding: 12px 14px 10px;
+  background: #fff;
+  border: 1px solid #cbd7e4;
+  border-left: 4px solid var(--node-accent);
+  border-radius: 10px;
+  box-shadow: 0 2px 5px #2038580c;
+}
+.schedule-board.flow-board .flow-node:hover, .schedule-board.flow-board .flow-node:focus-within,
+.schedule-board.flow-board .flow-node.is-located { outline: 2px solid #5680bf; outline-offset: 2px; }
+.flow-node-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
+.flow-sequence { color: #687a90; font-size: 11px; font-variant-numeric: tabular-nums; }
+.flow-board .flow-status-text { display: flex; align-items: center; gap: 5px; color: var(--node-ink); background: var(--node-tint); padding: 3px 7px; border-radius: 5px; font-size: 11px; line-height: 1.15; }
+.flow-board .flow-node .flow-status-dot { width: 5px; height: 5px; background: var(--node-accent); }
+.flow-board .flow-node-name { flex: 1; min-height: 0; align-items: flex-start; }
+.schedule-board.flow-board .flow-node .node-title {
+  color: #243750;
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: 650;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  max-height: 40px;
+  overflow-wrap: anywhere;
+}
+.flow-board .flow-node .node-title:hover { color: #245ab2; }
+.flow-board .flow-node-duration .task-duration { font-size: 11px; color: #5d718a; }
+.flow-board .flow-node .node-footer { margin-top: 6px; padding-top: 6px; min-height: 23px; border-top: 1px solid #e8edf4; }
+.flow-location { font-size: 11px; color: #61738a; min-width: 0; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.flow-board .node-actions { gap: 10px; }
+.flow-board .flow-node .node-footer button { color: #42638f; font-size: 11px; }
+.flow-board .graph-edge, .flow-board .graph-edge.done { stroke: #a8b8cc; stroke-width: 1.25; }
+.flow-board .graph-edge.error { stroke: #bf8291; }
+.flow-board.show-all-edges .graph-edge.secondary { stroke: #bac6d6; opacity: .55; stroke-dasharray: 3 4; }
+.flow-board .highlighting .graph-edge.highlighted { stroke: #5278b2; stroke-width: 2; opacity: 1; }
+.flow-board .highlighting .graph-node:not(.related) { opacity: .78; }
+.flow-board .flow-port { opacity: 0; }
+.flow-board .highlighting .flow-port.highlighted { opacity: 1; }
+.flow-board .schedule-foot { padding: 8px 16px; color: #62738a; }
+.graph-map-panel { display: flex; align-items: center; gap: 10px; }
+.graph-map-panel[hidden] { display: none; }
+.graph-map-panel > span { font-size: 11px; font-weight: 600; color: #475b75; }
+.graph-map-panel small { display: block; font-size: 10px; font-weight: 400; }
+.graph-minimap { display: block; width: 216px; height: 56px; padding: 3px; border: 1px solid #d7e1ed; border-radius: 6px; background: #f5f8fc; cursor: crosshair; touch-action: none; }
+.graph-minimap:focus-visible { outline: 2px solid #5278b2; }
+.map-node { fill: #aab6c8; }
+.map-node.complete { fill: #6ca38e; }.map-node.running { fill: #668bd0; }.map-node.failed { fill: #cd8692; }.map-node.waiting { fill: #c5a167; }
+.map-viewport { fill: #3065ba22; stroke: #2f63ad; stroke-width: 1.5; pointer-events: none; }
+@media (max-width: 700px) {
+  .flow-board .flow-board-header { padding: 12px; flex-wrap: wrap; gap: 8px; }
+  .flow-board-toolbar { padding: 0 12px 10px; }
+  .graph-locator { width: 100%; }
+  .graph-locator input { flex: 1; width: 0; }
+  .flow-board .flow-overview { padding: 8px 12px; }
+  .flow-board .graph-scroll { max-height: 58vh; }
+  .graph-component-picker select { max-width: 145px; }
+  .flow-board .schedule-foot { padding: 8px 12px; }
+  .graph-map-panel { width: 100%; justify-content: space-between; }
+  .graph-minimap { width: min(180px, 55%); }
+}

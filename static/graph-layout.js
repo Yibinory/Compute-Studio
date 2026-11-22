@@ -77,19 +77,22 @@ function routeTaskEdges(graph,edges){
   const nodes=new Map(graph.nodes.map(n=>[n.id,{...n,x:horizontal?n.y:n.x,y:horizontal?n.x:n.y}]));
   const rects=[...nodes.values()].map(n=>({left:n.x-6,right:n.x+w+6,top:n.y-6,bottom:n.y+h+6}));
   const xs=[...new Set([10,...rects.flatMap(r=>[r.left-3,r.right+3]),(horizontal?graph.height:graph.width)-10])].sort((a,b)=>a-b);
-  const ys=[...new Set([...nodes.values()].flatMap(n=>[n.y-12,n.y+h+12]))].sort((a,b)=>a-b);
-  const tracks=[], verticalObstacles=new Map(), horizontalObstacles=new Map();
-  function clear(a,b){
-    const vertical=a[0]===b[0],line=vertical?a[0]:a[1];
-    const cache=vertical?verticalObstacles:horizontalObstacles;
-    if(!cache.has(line)){
-      cache.set(line,vertical
-        ? rects.filter(r=>line>r.left&&line<r.right).map(r=>[r.top,r.bottom])
-        : rects.filter(r=>line>r.top&&line<r.bottom).map(r=>[r.left,r.right]));
+  const tracks=[],verticalObstacles=new Map();
+  function clearLane(x,top,bottom){
+    if(!verticalObstacles.has(x))verticalObstacles.set(x,rects.filter(r=>x>r.left&&x<r.right));
+    return !verticalObstacles.get(x).some(r=>bottom>r.top&&top<r.bottom);
+  }
+  function connectorLane(sx,tx,top,bottom){
+    if(clearLane(sx,top,bottom))return sx;
+    if(clearLane(tx,top,bottom))return tx;
+    // The side gutters are always free. Prefer an interior gutter near both endpoints.
+    const middle=(sx+tx)/2;
+    let lane=xs[0],distance=Infinity;
+    for(const x of xs){
+      const d=Math.abs(x-middle);
+      if(d<distance&&clearLane(x,top,bottom)){lane=x;distance=d;}
     }
-    const from=vertical?a[1]:a[0],to=vertical?b[1]:b[0];
-    const low=Math.min(from,to),high=Math.max(from,to);
-    return !cache.get(line).some(([start,end])=>high>start&&low<end);
+    return lane;
   }
   const routed=edges.map(edge=>{
     const source=nodes.get(edge.source),target=nodes.get(edge.target),sx=source.x+edge.sourceOffset,sy=source.y+h,tx=target.x+edge.targetOffset,ty=target.y;
@@ -100,31 +103,8 @@ function routeTaskEdges(graph,edges){
       tracks.push({row:source.row,track,left,right});const mid=low+(high-low)*(.25+(track%7)/12);
       points=[[sx,sy],[sx,mid],[tx,mid],[tx,ty]];
     }else{
-      const start=[sx,sy+12],end=[tx,ty-12],gx=[...new Set([...xs,sx,tx])].sort((a,b)=>a-b),gy=ys.filter(y=>y>=start[1]&&y<=end[1]);
-      if(!gy.includes(start[1]))gy.push(start[1]);if(!gy.includes(end[1]))gy.push(end[1]);gy.sort((a,b)=>a-b);
-      const startX=gx.indexOf(sx),startY=gy.indexOf(start[1]),endX=gx.indexOf(tx),endY=gy.indexOf(end[1]);
-      const queue=[{x:startX,y:startY,dir:1,cost:0,estimate:0,parent:null}],seen=new Map();let found=null;
-      while(queue.length){
-        // Manhattan distance bounds the remaining path length on this orthogonal grid.
-        queue.sort((a,b)=>b.estimate-a.estimate||a.cost-b.cost);const current=queue.pop(),key=current.x+','+current.y+','+current.dir;
-        if((seen.get(key)??Infinity)<=current.cost)continue;seen.set(key,current.cost);
-        if(current.x===endX&&current.y===endY){
-          found=[];
-          for(let step=current;step;step=step.parent)found.push([gx[step.x],gy[step.y]]);
-          found.reverse();break;
-        }
-        for(const [dx,dy,dir] of [[1,0,0],[-1,0,0],[0,1,1]]){
-          const x=current.x+dx,y=current.y+dy;if(x<0||x>=gx.length||y>=gy.length)continue;
-          const a=[gx[current.x],gy[current.y]],b=[gx[x],gy[y]];if(!clear(a,b))continue;
-          const cost=current.cost+Math.abs(b[0]-a[0])+Math.abs(b[1]-a[1])+(dir===current.dir?0:22);
-          if((seen.get(x+','+y+','+dir)??Infinity)>cost){
-            const estimate=cost+Math.abs(tx-b[0])+Math.abs(end[1]-b[1]);
-            queue.push({x,y,dir,cost,estimate,parent:current});
-          }
-        }
-      }
-      if(!found){const lane=(horizontal?graph.height:graph.width)-10;found=[start,[lane,start[1]],[lane,end[1]],end];}
-      points=[[sx,sy],...found,[tx,ty]];
+      const top=sy+12,bottom=ty-12,lane=connectorLane(sx,tx,top,bottom);
+      points=[[sx,sy],[sx,top],[lane,top],[lane,bottom],[tx,bottom],[tx,ty]];
     }
     // Remove collinear grid steps so rounded corners retain their full radius.
     const clean=points.filter((p,i)=>!i||i===points.length-1||!((points[i-1][0]===p[0]&&p[0]===points[i+1][0])||(points[i-1][1]===p[1]&&p[1]===points[i+1][1])));

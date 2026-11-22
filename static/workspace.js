@@ -45,10 +45,12 @@ if(document.body.dataset.authorized==='true')setInterval(()=>{const form=$('#not
 
 
 const scheduleGraphBaseAction=handleAction,scheduleGraphBaseRender=render;
-const graphScrollPositions=new Map();
-let graphScale=1,graphMountedProject=null,graphAutoFit=true;
+const graphViews=new Map();
+function graphView(project){
+  if(!graphViews.has(project))graphViews.set(project,{scale:1,fit:false,component:'',selected:'',center:null});
+  return graphViews.get(project);
+}
 let graphLayoutMode='dependencies',graphShowAllEdges=false,graphOrientation='vertical';
-let graphComponentId='',graphComponentProject='';
 function graphComponents(tasks){
   const links=new Map(tasks.map(t=>[t.id,[]])),map=new Map(tasks.map(t=>[t.id,t]));
   for(const t of tasks)for(const id of t.depends_on||[])if(links.has(id)){links.get(id).push(t.id);links.get(t.id).push(id);}
@@ -82,23 +84,19 @@ function graphConnector(points){
 }
 function scheduleGraph(tasks){
   if(!tasks.length)return empty('创建第一个实验节点','设置前序依赖，即可形成实验流程图。');
-  if(graphComponentProject!==route()[1]){graphComponentProject=route()[1];graphComponentId='';}
-  const totalTasks=tasks.length,components=graphComponents(tasks),component=components.find(c=>c.id===graphComponentId);
-  if(component)tasks=tasks.filter(t=>component.ids.has(t.id));else graphComponentId='';
-  const componentControl=components.length>1?`<label class="graph-component-picker"><span>流程</span><select id="graph-component" aria-label="选择要查看的独立流程"><option value="">全部 · ${totalTasks} 个实验</option>${components.map(c=>`<option value="${esc(c.id)}" ${c.id===graphComponentId?'selected':''}>${esc(c.name)} · ${c.ids.size} 个</option>`).join('')}</select></label>`:'';
+  const projectId=route()[1],view=graphView(projectId);
+  const totalTasks=tasks.length,components=graphComponents(tasks),component=components.find(c=>c.id===view.component);
+  if(component)tasks=tasks.filter(t=>component.ids.has(t.id));else view.component='';
+  const componentControl=components.length>1?`<label class="graph-component-picker"><span>流程</span><select id="graph-component" aria-label="选择要查看的独立流程"><option value="">全部 · ${totalTasks} 个实验</option>${components.map(c=>`<option value="${esc(c.id)}" ${c.id===view.component?'selected':''}>${esc(c.name)} · ${c.ids.size} 个</option>`).join('')}</select></label>`:'';
   const main=$('#main'),style=getComputedStyle(main),available=Math.max(280,main.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight)),horizontal=graphOrientation==='horizontal';
   let graph;
   try{
-    const base=layoutTasks(tasks,3,{mode:graphLayoutMode});
-    const width=horizontal?Math.max(180,Math.min(224,Math.floor((available-84-(base.rows.length-1)*48)/base.rows.length))):Math.max(192,Math.min(248,Math.floor((available-56-(base.maxParallel-1)*32)/base.maxParallel)));
-    const projectedWidth=56+(horizontal?base.rows.length:base.maxParallel)*(width+(horizontal?64:32))-(horizontal?64:32);
-    const overview=graphAutoFit&&available/projectedWidth<.85;
-    graph=layoutTasks(tasks,3,{nodeWidth:width,nodeHeight:overview?148:124,gapX:horizontal?64:32,gapY:horizontal?32:54,axis:24,top:28,mode:graphLayoutMode,orientation:graphOrientation});
+    graph=layoutTasks(tasks,3,{nodeWidth:Math.min(244,available-48),nodeHeight:148,gapX:horizontal?64:32,gapY:horizontal?32:54,axis:24,top:28,mode:graphLayoutMode,orientation:graphOrientation});
   }catch(error){return `<div class="notice warning">${esc(error.message)}</div>`;}
   const map=new Map(graph.nodes.map(n=>[n.id,n])),counts={complete:0,running:0,waiting:0,draft:0,failed:0,canceled:0};
   tasks.forEach(t=>counts[graphState(t)]++);
   const edges=routeTaskEdges(graph,assignTaskPorts(graph)),secondaryCount=edges.filter(e=>e.secondary).length;
-  if(graphAutoFit)graphScale=Math.max(.05,Math.min(1,Math.floor((available-26)/graph.width*100)/100));
+  const scale=view.fit?Math.min(1,(available-26)/graph.width):view.scale;
   const paths=edges.map(edge=>{
     const p=map.get(edge.source),n=map.get(edge.target),points=edge.points;
     const kind=graphState(p)==='complete'?'done':graphState(p)==='failed'?'error':'wait';
@@ -114,20 +112,168 @@ function scheduleGraph(tasks){
     const metadata=[t.name,labels[t.status]||t.status,server+(t.gpu_index!=null?' · GPU '+t.gpu_index:''),elapsed,t.reason,t.exit_code!=null?'退出码 '+t.exit_code:'',graphLayoutMode==='time'?fmt(t.started_at||t.created_at):''].filter(Boolean).join('\n');
     return `<article class="graph-node schedule-node flow-node ${status}" data-node-id="${esc(t.id)}" title="${esc(metadata)}" style="left:${t.x}px;top:${t.y}px;width:${graph.nodeWidth}px;height:${graph.nodeHeight}px">${ports(t.id,'in')}<div class="flow-node-top"><span class="flow-sequence">#${esc(t.seq)}</span><span class="flow-status-text"><i class="flow-status-dot"></i>${esc(labels[t.status]||t.status)}</span></div><div class="flow-node-name"><button class="node-title" data-action="task-detail" data-id="${esc(t.id)}" title="${esc(t.name)}">${esc(displayName)}</button></div><div class="flow-node-duration">${taskDurationMarkup(t)}</div><div class="node-footer"><span class="flow-location" title="${esc(server)}">${esc(t.server_id?server:'自动调度')}</span><div class="node-actions">${button('task-detail','输出 '+outputCount,`data-id="${esc(t.id)}" title="${esc(files.map(v=>v.path).join('\n')||'运行后显示输出文件')}"`,'small output-button')}${button('graph-notes',notes.length?'Notes '+notes.length:'Notes',`data-id="${esc(t.id)}"`,'small note-button')}</div></div>${ports(t.id,'out')}</article>`;
   }).join('');
-  return `<section class="schedule-board flow-board compact-flow ${horizontal?'horizontal':'vertical'} ${graphShowAllEdges?'show-all-edges':''}"><header class="flow-board-header"><div><strong>实验流程 <small>${tasks.length}${component?'/'+totalTasks:''} 个节点 · ${edges.length} 条依赖</small></strong><span>${graph.maxParallel>1?'最多 '+graph.maxParallel+' 个并列节点':'当前依赖为串行'}</span></div><div class="flow-controls">${componentControl}<div class="flow-layout-switch" aria-label="流程方向">${button('graph-orientation','纵向','data-orientation="vertical"',!horizontal?'active':'')}${button('graph-orientation','横向','data-orientation="horizontal"',horizontal?'active':'')}</div><div class="flow-layout-switch">${button('graph-layout-mode','依赖层级','data-mode="dependencies"',graphLayoutMode==='dependencies'?'active':'')}${button('graph-layout-mode','执行时间','data-mode="time"',graphLayoutMode==='time'?'active':'')}</div>${secondaryCount?button('graph-edge-mode',graphShowAllEdges?'全部依赖':'精简依赖','title="显示或隐藏间接路径中的重复依赖，不改变实验配置"','small flow-edge-toggle'):''}${button('graph-fit','适应宽度','','small graph-fit-button '+(graphAutoFit?'active':''))}<div class="schedule-zoom">${button('graph-zoom-out','−',`${graphScale<=.2?'disabled':''} aria-label="缩小调度图"`,'small')}${button('graph-zoom-reset',Math.round(graphScale*100)+'%','title="恢复原始大小"','small')}${button('graph-zoom-in','＋',`${graphScale>=1.5?'disabled':''} aria-label="放大调度图"`,'small')}</div></div></header><div class="flow-overview"><div>${summary}</div><span>已完成并回传 <b>${counts.complete} / ${tasks.length}</b></span></div><div class="graph-scroll" tabindex="0" aria-label="实验流程图，可滚动查看"><div class="schedule-scaled-space" style="width:${graph.width*graphScale}px;height:${graph.height*graphScale}px"><div class="schedule-canvas" style="width:${graph.width}px;height:${graph.height}px;transform:scale(${graphScale});transform-origin:top left;--graph-text-boost:${graphAutoFit?Math.min(1.4,1/graphScale):1}"><svg class="graph-lines" width="${graph.width}" height="${graph.height}" aria-label="实验依赖关系"><defs>${markers}</defs>${paths}</svg>${cards}</div></div></div><footer class="schedule-foot"><span>${graphLayoutMode==='dependencies'?(horizontal?'同列':'同层')+'节点可独立调度':horizontal?'时间从左向右':'时间从上到下'}${secondaryCount&&!graphShowAllEdges?' · 隐藏 '+secondaryCount+' 条间接路径（配置保留）':''}</span><span>点击节点查看详情 · 输出 · Notes</span></footer></section>`;
+  const choices=[...tasks].sort((a,b)=>a.seq-b.seq).map(t=>
+    `<option data-task="${esc(t.id)}" data-seq="${esc(t.seq)}" value="#${esc(t.seq)} ${esc(t.name)}"></option>`).join('');
+  const overviewNodes=graph.nodes.map(n=>
+    `<rect class="map-node ${graphState(n)}" x="${n.x}" y="${n.y}" width="${graph.nodeWidth}" height="${graph.nodeHeight}"/>`).join('');
+  const zoomButton=(action,label,attrs='')=>button(action,label,attrs,'small');
+  return `<section class="schedule-board flow-board compact-flow ${horizontal?'horizontal':'vertical'} ${graphShowAllEdges?'show-all-edges':''}">
+    <header class="flow-board-header"><div><strong>实验流程 <small>${tasks.length}${component?'/'+totalTasks:''} 个节点 · ${edges.length} 条依赖</small></strong>
+      <span>${graph.maxParallel>1?'最多 '+graph.maxParallel+' 个并列节点':'当前依赖为串行'}</span></div>
+      <div class="graph-locator"><input id="graph-search" type="search" list="graph-task-options" placeholder="实验名称或 #编号" aria-label="按实验名称或编号定位" autocomplete="off">
+        <datalist id="graph-task-options">${choices}</datalist>${button('graph-locate','定位实验','','small')}</div>
+    </header>
+    <div class="flow-board-toolbar"><div class="flow-controls">${componentControl}
+      <div class="flow-layout-switch" role="group" aria-label="流程方向">${button('graph-orientation','纵向',`data-orientation="vertical" aria-pressed="${!horizontal}"`,!horizontal?'active':'')}${button('graph-orientation','横向',`data-orientation="horizontal" aria-pressed="${horizontal}"`,horizontal?'active':'')}</div>
+      <div class="flow-layout-switch" role="group" aria-label="布局方式">${button('graph-layout-mode','依赖层级',`data-mode="dependencies" aria-pressed="${graphLayoutMode==='dependencies'}"`,graphLayoutMode==='dependencies'?'active':'')}${button('graph-layout-mode','执行时间',`data-mode="time" aria-pressed="${graphLayoutMode==='time'}"`,graphLayoutMode==='time'?'active':'')}</div>
+      ${secondaryCount?button('graph-edge-mode',graphShowAllEdges?'全部依赖':'精简依赖','title="显示或隐藏间接依赖路径"','small flow-edge-toggle'):''}</div>
+      <div class="graph-scale-controls">${button('graph-fit','适应宽度',`aria-pressed="${view.fit}"`,'small graph-fit-button '+(view.fit?'active':''))}
+      <div class="schedule-zoom">${zoomButton('graph-zoom-out','−',`${scale<=.2?'disabled':''} aria-label="缩小调度图"`)}${zoomButton('graph-zoom-reset',Math.round(scale*100)+'%','title="恢复原始大小" aria-label="恢复到 100%"')}${zoomButton('graph-zoom-in','＋',`${scale>=1.5?'disabled':''} aria-label="放大调度图"`)}</div></div>
+    </div>
+    <div class="flow-overview"><div>${summary}</div><span>已完成并回传 <b>${counts.complete} / ${tasks.length}</b></span></div>
+    <div class="graph-scroll" data-project="${esc(projectId)}" data-scale="${scale}" data-layout="${graphOrientation}/${graphLayoutMode}" tabindex="0" aria-label="实验流程图，可按住鼠标左键拖动或用方向键滚动">
+      <div class="schedule-scaled-space" style="width:${graph.width*scale}px;height:${graph.height*scale}px"><div class="schedule-canvas" style="width:${graph.width}px;height:${graph.height}px;transform:scale(${scale});transform-origin:top left">
+        <svg class="graph-lines" width="${graph.width}" height="${graph.height}" aria-label="实验依赖关系"><defs>${markers}</defs>${paths}</svg>${cards}
+      </div></div>
+    </div>
+    <footer class="schedule-foot"><div><span class="graph-pan-hint">按住左键拖动画布</span><span>${graphLayoutMode==='dependencies'?(horizontal?'同列':'同层')+'节点可独立调度':horizontal?'时间从左向右':'时间从上到下'}${secondaryCount&&!graphShowAllEdges?' · 隐藏 '+secondaryCount+' 条间接路径（配置保留）':''}</span></div>
+      <div class="graph-map-panel" hidden><span>全图导航<small>点击或拖动定位</small></span>
+      <svg class="graph-minimap" viewBox="0 0 ${graph.width} ${graph.height}" role="group" tabindex="0" aria-label="全图导航，可点击、拖动或用方向键移动视窗">${overviewNodes}<rect class="map-viewport" vector-effect="non-scaling-stroke"/></svg></div>
+    </footer></section>`;
 }
 
 
+// Keep the viewport in diagram coordinates so zoom and polling preserve the reading position.
+function graphFrame(scroll){
+  const space=scroll.firstElementChild,scale=Number(scroll.dataset.scale);
+  return {x:(scroll.scrollLeft-space.offsetLeft)/scale,y:(scroll.scrollTop-space.offsetTop)/scale,
+    width:scroll.clientWidth/scale,height:scroll.clientHeight/scale};
+}
+function panGraph(scroll,x,y){
+  const space=scroll.firstElementChild,scale=Number(scroll.dataset.scale);
+  scroll.scrollLeft=space.offsetLeft+x*scale-scroll.clientWidth/2;
+  scroll.scrollTop=space.offsetTop+y*scale-scroll.clientHeight/2;
+}
+function centerGraphNode(scroll,node){
+  panGraph(scroll,node.offsetLeft+node.offsetWidth/2,node.offsetTop+node.offsetHeight/2);
+}
+function rememberGraphCenter(scroll){
+  const frame=graphFrame(scroll),view=graphView(scroll.dataset.project);
+  view.center={x:frame.x+frame.width/2,y:frame.y+frame.height/2,layout:scroll.dataset.layout};
+  view.viewportWidth=scroll.clientWidth;
+}
+function updateGraphMap(scroll){
+  const panel=$('.graph-map-panel',scroll.closest('.flow-board'));
+  panel.hidden=scroll.scrollWidth<=scroll.clientWidth+1&&scroll.scrollHeight<=scroll.clientHeight+1;
+  scroll.classList.toggle('can-pan',!panel.hidden);
+  if(panel.hidden)return;
+  const map=$('.graph-minimap',panel),frame=graphFrame(scroll),bounds=map.viewBox.baseVal;
+  const x=Math.max(0,frame.x),y=Math.max(0,frame.y),rect=$('.map-viewport',map);
+  rect.setAttribute('x',x);rect.setAttribute('y',y);
+  rect.setAttribute('width',Math.max(0,Math.min(bounds.width,frame.x+frame.width)-x));
+  rect.setAttribute('height',Math.max(0,Math.min(bounds.height,frame.y+frame.height)-y));
+}
+function enableGraphMousePan(scroll){
+  let press=null, suppressClick=false;
+  function finish(){
+    if(!press)return;
+    const {target,id,listeners}=press;
+    suppressClick=scroll.dataset.mousePan==='dragging';
+    press=null;
+    delete scroll.dataset.mousePan;
+    listeners.abort();
+    if(target.hasPointerCapture(id))target.releasePointerCapture(id);
+  }
+  scroll.addEventListener('pointerdown',event=>{
+    if(event.button!==0)return;
+    suppressClick=false;
+    if(press||event.pointerType!=='mouse'||event.shiftKey||event.ctrlKey||event.altKey||event.metaKey||!scroll.classList.contains('can-pan'))return;
+    const bounds=scroll.getBoundingClientRect(),unit=scroll.offsetWidth/bounds.width;
+    const x=(event.clientX-bounds.left)*unit-scroll.clientLeft,y=(event.clientY-bounds.top)*unit-scroll.clientTop;
+    if(x<0||y<0||x>=scroll.clientWidth||y>=scroll.clientHeight)return; // Native scrollbar
+    const listeners=new AbortController();
+    press={target:event.target,id:event.pointerId,x:event.clientX,y:event.clientY,left:scroll.scrollLeft,top:scroll.scrollTop,unit,listeners};
+    scroll.dataset.mousePan='pending';
+    // Capture on the pressed element so an ordinary click still reaches its button.
+    event.target.setPointerCapture(event.pointerId);
+    for(const type of ['pointerup','pointercancel','lostpointercapture']){
+      window.addEventListener(type,e=>{if(press?.id===e.pointerId)finish();},{capture:true,signal:listeners.signal});
+    }
+    window.addEventListener('blur',finish,{signal:listeners.signal});
+  });
+  scroll.addEventListener('pointermove',event=>{
+    if(!press||event.pointerId!==press.id)return;
+    if(!(event.buttons&1)){finish();return;}
+    const dx=event.clientX-press.x,dy=event.clientY-press.y;
+    if(scroll.dataset.mousePan==='pending'){
+      if(Math.hypot(dx,dy)<5)return;
+      scroll.dataset.mousePan='dragging';
+    }
+    scroll.scrollLeft=press.left-dx*press.unit;
+    scroll.scrollTop=press.top-dy*press.unit;
+  });
+  scroll.addEventListener('click',event=>{
+    if(suppressClick&&event.detail>0){
+      suppressClick=false;
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  },true);
+}
+function mountGraph(scroll){
+  const view=graphView(scroll.dataset.project);
+  const selected=view.selected&&scroll.querySelector(`[data-node-id="${CSS.escape(view.selected)}"]`);
+  if(selected)selected.classList.add('is-located');
+  else if(view.selected){view.selected='';view.reframe=true;}
+  if(view.jump&&selected)centerGraphNode(scroll,selected);
+  else if(!view.reframe&&view.center?.layout===scroll.dataset.layout)panGraph(scroll,view.center.x,view.center.y);
+  else if(!view.fit){
+    const node=selected||$('.flow-node.running',scroll)||$('.flow-node',scroll);
+    if(node)centerGraphNode(scroll,node);
+  }
+  view.jump=false;view.reframe=false;
+  rememberGraphCenter(scroll);updateGraphMap(scroll);
+  enableGraphMousePan(scroll);
+  scroll.addEventListener('scroll',()=>{
+    if(!scroll.isConnected)return;
+    rememberGraphCenter(scroll);updateGraphMap(scroll);
+  },{passive:true});
+}
 render=function(){
-  const old=$('.graph-scroll'),key=route()[1];if(old&&graphMountedProject)graphScrollPositions.set(graphMountedProject,{left:old.scrollLeft,top:old.scrollTop});
-  scheduleGraphBaseRender();const next=$('.graph-scroll'),position=graphScrollPositions.get(key);if(next&&position){next.scrollLeft=position.left;next.scrollTop=position.top;}graphMountedProject=next?key:null;
+  const old=$('.flow-board .graph-scroll');
+  if(old&&old.clientWidth===graphView(old.dataset.project).viewportWidth)rememberGraphCenter(old);
+  scheduleGraphBaseRender();
+  const next=$('.flow-board .graph-scroll');if(next)mountGraph(next);
 };
+function locateGraphTask(){
+  const search=$('#graph-search'),query=search.value.trim().toLocaleLowerCase();
+  if(!query){search.focus();return;}
+  const options=Array.from(search.list.options);
+  const match=options.find(o=>o.dataset.seq===query.replace(/^#/,''))||
+    options.find(o=>o.value.toLocaleLowerCase()===query)||options.find(o=>o.value.toLocaleLowerCase().includes(query));
+  if(!match){toast('当前流程中找不到这个实验');search.focus();return;}
+  const scroll=$('.graph-scroll'),view=graphView(scroll.dataset.project);
+  view.selected=match.dataset.task;
+  if(Number(scroll.dataset.scale)<1){
+    view.fit=false;view.scale=1;view.jump=true;render();
+  }else{
+    const node=scroll.querySelector(`[data-node-id="${CSS.escape(view.selected)}"]`);
+    $('.is-located',scroll)?.classList.remove('is-located');
+    node.classList.add('is-located');centerGraphNode(scroll,node);
+  }
+  $('.flow-node.is-located .node-title')?.focus({preventScroll:true});
+}
 handleAction=async function(el){
-  if(el.dataset.action==='graph-orientation'){graphOrientation=el.dataset.orientation;graphScrollPositions.delete(route()[1]);graphMountedProject=null;render();return;}
-  if(el.dataset.action==='graph-layout-mode'){graphLayoutMode=el.dataset.mode;graphScrollPositions.delete(route()[1]);graphMountedProject=null;render();return;}
+  if(el.dataset.action==='graph-orientation'){graphOrientation=el.dataset.orientation;graphView(route()[1]).reframe=true;render();return;}
+  if(el.dataset.action==='graph-layout-mode'){graphLayoutMode=el.dataset.mode;graphView(route()[1]).reframe=true;render();return;}
   if(el.dataset.action==='graph-edge-mode'){graphShowAllEdges=!graphShowAllEdges;render();return;}
-  if(el.dataset.action==='graph-fit'){graphAutoFit=true;graphScrollPositions.delete(route()[1]);graphMountedProject=null;render();return;}
-  if(el.dataset.action.startsWith('graph-zoom-')){graphAutoFit=false;graphScale=el.dataset.action==='graph-zoom-reset'?1:Math.max(.2,Math.min(1.5,Math.round((graphScale+(el.dataset.action==='graph-zoom-in'?.1:-.1))*100)/100));render();return;}
+  if(el.dataset.action==='graph-locate'){locateGraphTask();return;}
+  if(el.dataset.action==='graph-fit'){const view=graphView(route()[1]);view.fit=true;view.reframe=true;render();return;}
+  if(el.dataset.action.startsWith('graph-zoom-')){
+    const view=graphView(route()[1]),current=Number($('.graph-scroll').dataset.scale);
+    view.fit=false;view.scale=el.dataset.action==='graph-zoom-reset'?1:Math.max(.2,Math.min(1.5,Math.round((current+(el.dataset.action==='graph-zoom-in'?.1:-.1))*100)/100));
+    render();return;
+  }
   if(el.dataset.action==='graph-notes'){await taskDetail(el.dataset.id);noteEditorSetView($('#note-form'),'split');$('#note-form textarea')?.focus();return;}
   return scheduleGraphBaseAction(el);
 };
@@ -137,11 +283,44 @@ function graphHighlight(node){
   canvas.querySelectorAll('.graph-edge,.flow-port').forEach(edge=>{const active=edge.dataset.source===id||edge.dataset.target===id;edge.classList.toggle('highlighted',active);if(active){related.add(edge.dataset.source);related.add(edge.dataset.target);}});
   canvas.classList.add('highlighting');canvas.querySelectorAll('.graph-node').forEach(card=>card.classList.toggle('related',related.has(card.dataset.nodeId)));
 }
-document.addEventListener('pointerover',e=>{const node=e.target.closest('.schedule-node');if(node)graphHighlight(node);});
+document.addEventListener('pointerover',e=>{const node=e.target.closest('.schedule-node');if(node&&!node.contains(e.relatedTarget))graphHighlight(node);});
 document.addEventListener('pointerout',e=>{const node=e.target.closest('.schedule-node');if(!node||node.contains(e.relatedTarget))return;const canvas=node.closest('.schedule-canvas');canvas?.classList.remove('highlighting');});
 document.addEventListener('focusin',e=>{const node=e.target.closest('.schedule-node');if(node)graphHighlight(node);});
 document.addEventListener('focusout',e=>{const node=e.target.closest('.schedule-node');if(node&&!node.contains(e.relatedTarget))node.closest('.schedule-canvas')?.classList.remove('highlighting');});
 let scheduleResizeTimer;
-window.addEventListener('resize',()=>{clearTimeout(scheduleResizeTimer);scheduleResizeTimer=setTimeout(()=>{if($('.schedule-board'))render();},150);});
+window.addEventListener('resize',()=>{
+  clearTimeout(scheduleResizeTimer);
+  scheduleResizeTimer=setTimeout(()=>{
+    const scroll=$('.flow-board .graph-scroll');if(!scroll)return;
+    const view=graphView(scroll.dataset.project);
+    if(view.selected&&scroll.clientWidth!==view.viewportWidth)view.jump=true;
+    render();
+  },150);
+});
 
-document.addEventListener('change',event=>{if(event.target.id==='graph-component'){graphComponentId=event.target.value;graphAutoFit=true;graphScrollPositions.delete(route()[1]);graphMountedProject=null;render();}});
+document.addEventListener('change',event=>{
+  if(event.target.id==='graph-search'&&Array.from(event.target.list.options).some(o=>o.value===event.target.value))locateGraphTask();
+  if(event.target.id==='graph-component'){
+    Object.assign(graphView(route()[1]),{component:event.target.value,selected:'',scale:1,fit:false,reframe:true});
+    render();
+  }
+});
+function panFromMap(map,event){
+  const matrix=map.getScreenCTM();if(!matrix)return;
+  const point=new DOMPoint(event.clientX,event.clientY).matrixTransform(matrix.inverse());
+  panGraph($('.graph-scroll',map.closest('.flow-board')),point.x,point.y);
+}
+document.addEventListener('pointerdown',event=>{
+  const map=event.target.closest('.graph-minimap');if(!map||event.button!==0)return;
+  map.setPointerCapture(event.pointerId);panFromMap(map,event);
+});
+document.addEventListener('pointermove',event=>{
+  const map=event.target.closest('.graph-minimap');if(map?.hasPointerCapture(event.pointerId))panFromMap(map,event);
+});
+document.addEventListener('keydown',event=>{
+  if(event.target.id==='graph-search'&&event.key==='Enter'&&!event.isComposing){event.preventDefault();locateGraphTask();return;}
+  if(!event.target.matches('.graph-minimap'))return;
+  const scroll=$('.graph-scroll',event.target.closest('.flow-board'));
+  const steps={ArrowLeft:[-.65,0],ArrowRight:[.65,0],ArrowUp:[0,-.65],ArrowDown:[0,.65]};
+  if(steps[event.key]){event.preventDefault();const [x,y]=steps[event.key];scroll.scrollBy(x*scroll.clientWidth,y*scroll.clientHeight);}
+});

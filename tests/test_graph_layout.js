@@ -67,4 +67,23 @@ for(const orientation of ['vertical','horizontal']){
 }
 const separate=layoutTasks([{id:'old1'},{id:'old2',depends_on:['old1']},{id:'r'},...Array.from({length:5},(_,i)=>({id:'p'+i,depends_on:['r']}))]);
 assert(Math.abs(separate.nodes.find(n=>n.id==='old1').x-separate.nodes.find(n=>n.id==='old2').x)<1,'independent chain stays aligned');
+// Many parallel runs, staggered timestamps and cross-rank dependencies exercise the long-edge router.
+const dense=[];
+for(let row=0;row<7;row++)for(let col=0;col<24;col++){
+  const parents=[];
+  if(row)for(let offset=0;offset<3;offset++)parents.push(`${row-1}-${(col+offset)%24}`);
+  if(row>1)parents.push(`${row-2}-${col}`,`0-${(col+12)%24}`);
+  dense.push({id:`${row}-${col}`,seq:dense.length,created_at:(row*25+col)*60,depends_on:parents});
+}
+for(const orientation of ['vertical','horizontal'])for(const mode of ['dependencies','time']){
+  const g=layoutTasks(dense,3,{nodeWidth:244,nodeHeight:148,gapX:64,gapY:54,orientation,mode});
+  const edges=routeTaskEdges(g,assignTaskPorts(g));
+  assert.equal(edges.length,dense.reduce((sum,t)=>sum+t.depends_on.length,0));
+  for(const edge of edges)for(let i=1;i<edge.points.length;i++){
+    const [x,y]=edge.points[i-1],[xx,yy]=edge.points[i];
+    assert(x===xx||y===yy);
+    assert(!g.nodes.some(n=>Math.min(x,xx)<n.x+g.nodeWidth-.001&&Math.max(x,xx)>n.x+.001&&
+      Math.min(y,yy)<n.y+g.nodeHeight-.001&&Math.max(y,yy)>n.y+.001),'dense connector crosses a card');
+  }
+}
 console.log('Graph layout and routing: both orientations, parallel/merge alignment, card avoidance, unique ports, deterministic routes, unchanged dependencies and cycle rejection passed.');

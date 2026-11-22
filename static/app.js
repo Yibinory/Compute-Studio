@@ -172,7 +172,8 @@ async function load(renderPage = true, polling = false) {
   return read.promise;
 }
 function editingMain() {
-  return $('#main').contains(document.activeElement) && document.activeElement.matches('input,select,textarea');
+  return (document.activeElement.matches('input,select,textarea') && $('#main').contains(document.activeElement))
+    || !!$('.graph-scroll[data-mouse-pan]');
 }
 function pollWorkspace() {
   if (document.hidden || activeStateRead) return;
