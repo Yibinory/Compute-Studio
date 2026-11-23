@@ -10,6 +10,38 @@ from scheduler.result_tables import read,save,scopes,assign_dataset,export_csv,s
 from test_api import client,login
 
 
+def test_named_tables_keep_legacy_data_and_concurrent_edits_separate(client):
+    c,app=client;headers=login(c,app);engine=app.extensions['engine']
+    pid=engine.create_project({'name':'manual_tables'})['id']
+    base='/api/projects/'+pid+'/results';scope={'dataset':'ECG'}
+    original=save(engine,pid,table(engine,pid,'ECG'),'ECG')
+    payload={'table_id':'ablation','name':'消融实验','columns':[]}
+    def create(body):
+        return c.post(base+'/tables',query_string=scope,json=body,headers=headers)
+    assert create(payload).json==create(payload).json
+    assert c.post(base+'/tables',query_string=scope,json=payload).status_code==403
+    assert create({**payload,'table_id':'other'}).status_code==400
+    assert create({'table_id':'trial','name':'中间尝试'}).status_code==200
+    target={**scope,'table':'ablation'}
+    doc=c.get(base,query_string=target).json
+    doc.update(name='新版消融',columns=original['columns'],fields=['label'],request_id='edit',
+               rows=[{'id':'a','label':'独立记录','values':{'score':0}},{'id':'b','group':'基线','values':{'score':-2}},{'id':'c','group':'基线','values':{'score':2}}])
+    saved=c.post(base,query_string=target,json=doc,headers=headers)
+    assert saved.status_code==200 and saved.json['fields']==['label']
+    assert c.post(base,query_string=target,json=doc,headers=headers).json==saved.json
+    assert c.post(base,query_string=scope,json=doc,headers=headers).status_code==400
+    assert c.post(base,query_string=target,json={**doc,'request_id':'stale'},headers=headers).status_code==409
+    assert c.get(base,query_string={**target,'dataset':'wrong'}).status_code==400
+    result=c.get(base,query_string=target).json
+    assert result['summary'][0]['name']=='独立记录' and result['summary'][0]['values']['score']['mean']==0
+    assert result['summary'][1]['values']['score']['std']==pytest.approx(8**.5)
+    assert c.get(base,query_string={**scope,'table':'trial'}).json['rows']==[]
+    assert read(engine,pid,'ECG')==original
+    assert [t['name'] for t in c.get(base+'/tables',query_string=scope).json['tables']]==['默认结果表','新版消融','中间尝试']
+    export=c.get(base+'/export',query_string=target)
+    assert '独立记录' in export.data.decode('utf-8-sig') and 'keep this' not in export.data.decode('utf-8-sig')
+
+
 def table(engine,pid,dataset='',metric='Dice',value=.9):
     doc=read(engine,pid,dataset)
     doc.update(request_id='request_'+str(len(dataset)),columns=[{'id':'score','name':metric,'type':'number','precision':3,'direction':'max','unit':''}],

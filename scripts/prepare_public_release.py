@@ -14,7 +14,8 @@ CODE_DIRS = {'scheduler': {'.py'}, 'templates': {'.html'}, 'tests': {'.py', '.js
              'examples': {'.py', '.sh', '.json'}}
 STATIC_EXTENSIONS = {'.js', '.css', '.png', '.json', '.ttf', '.woff', '.woff2'}
 TEXT_EXTENSIONS = {'.py','.js','.css','.html','.md','.json','.sh','.txt','.bat'}
-GUIDES = ('docs/实验脚本与批量配置指导.md', 'docs/AI操作接口.md')
+GUIDES = ('docs/实验脚本与批量配置指导.md', 'docs/AI操作接口.md', 'docs/项目架构与存储.md', 'docs/内容复用与批量状态指南.md')
+README_SCREENSHOTS = ('overview.png', 'projects.png', 'experiments.png', 'results.png', 'result-charts.png')
 
 
 def write_guide_fallback(root):
@@ -35,8 +36,9 @@ def build(output):
         selected.extend(p for p in (ROOT / folder).rglob('*') if p.is_file() and p.suffix in extensions and '__pycache__' not in p.parts)
     selected.extend(p for p in (ROOT / 'static').rglob('*') if p.is_file() and (p.suffix in STATIC_EXTENSIONS or p.name == 'LICENSE'))
     selected.extend(ROOT / guide for guide in GUIDES)
-    selected.extend([ROOT / 'scripts/prepare_public_release.py', ROOT / 'scripts/audit_public_release.py'])
-    selected.extend(p for p in (ROOT/'docs/images'/name for name in ('overview.png','experiments.png','results.png')) if p.is_file())
+    selected.extend([ROOT / 'scripts/prepare_public_release.py', ROOT / 'scripts/audit_public_release.py',
+                     ROOT / 'scripts/compact_transfer_database.py'])
+    selected.extend(ROOT / 'docs' / 'images' / name for name in README_SCREENSHOTS)
     output.mkdir(parents=True)
     for source in sorted(set(selected)):
         if source.is_symlink():raise ValueError('Linked source rejected: ' + str(source.relative_to(ROOT)))

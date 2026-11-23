@@ -139,15 +139,20 @@ async function copyProjectPrompt(projectId) {
   if (!project) throw Error('找不到这个项目，请刷新项目列表。');
   const {studioRoot, controllerPort} = document.body.dataset;
   const demo = state.settings.demo;
+  const ps = value => "'" + String(value).replaceAll("'", "''") + "'";
+  const cli = `python .\\studio_cli.py ${demo ? '--demo ' : ''}--port ${controllerPort} --data-dir ${ps(state.local_storage.root)}`;
   const prompt = [
-    `请按我接下来的要求操作算力工坊${demo ? '演示' : '正式'}工作空间中的这个项目。`,
+    `这是我在算力工坊${demo ? '演示' : '正式'}工作空间使用的项目。请按我接下来给出的要求操作这个项目。`,
     `项目名称：${project.name}`,
     `项目 ID：${project.id}`,
     `算力工坊目录：${studioRoot}`,
     `工作空间保存目录：${state.local_storage.root}`,
     '',
-    `请在控制器本机从算力工坊目录运行 studio_cli.py，接口文档是 docs/AI操作接口.md。全局参数使用 ${demo ? '--demo ' : ''}--port ${controllerPort}，并用 --data-dir 指定上述保存目录。`,
-    '先用 projects 核对完整项目 ID，后续用该 ID 指定目标项目。新建实验时建议使用低干扰模式（level = low_interference）。导入后先保留草稿，等我要求排队时再入队。'
+    '需要操作时，在控制器本机使用 studio_cli.py，接口文档见 docs/AI操作接口.md。可用以下 PowerShell 命令核对项目 ID，后续命令沿用相同的工作空间参数。',
+    `Set-Location -LiteralPath ${ps(studioRoot)}`,
+    `${cli} projects`,
+    '后续用上面的完整项目 ID 指定目标。新建实验时建议使用低干扰模式（level = low_interference）。导入后先保留草稿，等我要求排队时再入队。',
+    '执行我的任务时，每次拿到新的实验结果，请自动整理到本项目对应的结果表，并关联产生该结果的实验运行。'
   ].join('\n');
 
   try {

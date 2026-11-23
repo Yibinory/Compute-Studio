@@ -19,12 +19,12 @@ def tail_stream(stream,length,lines=200,max_bytes=TAIL_BYTES):
             'truncated_line':end>0 and newlines<=lines,'read_bytes':read}
 
 
-def chunk_stream(stream,length,offset=0,limit=CHUNK_BYTES):
+def chunk_stream(stream,length,offset=0,limit=CHUNK_BYTES,errors='replace'):
     if offset<0 or not 1<=limit<=CHUNK_BYTES:raise ValueError('日志分页参数无效')
     if offset>length:offset=0
     stream.seek(offset);raw=stream.read(min(limit,max(0,length-offset)))
     final=offset+len(raw)>=length
-    decoder=codecs.getincrementaldecoder('utf-8')(errors='replace')
+    decoder=codecs.getincrementaldecoder('utf-8')(errors=errors)
     text=decoder.decode(raw,final=final);pending=decoder.getstate()[0]
     # A very small requested page must still make progress across a UTF-8 char.
     if pending and len(pending)==len(raw):

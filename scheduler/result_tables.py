@@ -15,6 +15,8 @@ DEFAULT_COLUMNS=[{'id':'metric_1','name':'指标 1','type':'number','direction':
                  {'id':'metric_2','name':'指标 2','type':'number','direction':'max','precision':4,'unit':''}]
 MAX_ROWS=5000
 MAX_COLUMNS=24
+DEFAULT_NAME='默认结果表'
+DEFAULT_FIELDS=['task','group','seed','notes']
 
 
 def text(value,limit,label):
@@ -33,16 +35,19 @@ def dataset_name(value):
     return value
 
 
-def table_key(project_id,dataset=''):
-    return project_id+':'+hashlib.sha256(dataset.encode('utf-8')).hexdigest() if dataset else project_id
+def table_key(project_id,dataset='',table_id=''):
+    scope=project_id+':'+hashlib.sha256(dataset.encode('utf-8')).hexdigest() if dataset else project_id
+    return scope+':table:'+identifier(table_id) if table_id else scope
 
 
-def read(engine,project_id,dataset=''):
+def read(engine,project_id,dataset='',table_id=''):
     engine.store.get('projects',project_id)
-    dataset=dataset_name(dataset);key=table_key(project_id,dataset)
+    dataset=dataset_name(dataset);key=table_key(project_id,dataset,table_id)
     try:value=engine.store.get('result_tables',key)
-    except ValueError:value={'id':key,'project_id':project_id,'revision':0,'columns':copy.deepcopy(DEFAULT_COLUMNS),'rows':[],'updated_at':None}
-    return {**value,'dataset':dataset}
+    except ValueError:
+        if table_id:raise ValueError('当前数据集下没有这张结果表') from None
+        value={'id':key,'project_id':project_id,'revision':0,'columns':copy.deepcopy(DEFAULT_COLUMNS),'rows':[],'updated_at':None}
+    return {'name':DEFAULT_NAME,'fields':DEFAULT_FIELDS.copy(),**value,'dataset':dataset,'table_id':table_id}
 
 
 def scopes(engine,project_id):
@@ -62,9 +67,72 @@ def scope_record(engine,project_id,dataset):
     return value
 
 
+def table_list(engine,project_id,dataset):
+    engine.store.get('projects',project_id)
+    dataset=dataset_name(dataset)
+    index=scope_record(engine,project_id,dataset).get('tables',{}).get(dataset,{})
+    return [{'table_id':'','name':index.get('',DEFAULT_NAME)},
+            *[{'table_id':key,'name':name} for key,name in index.items() if key]]
+
+
+def register_name(engine,project_id,dataset,table_id,name):
+    value=scope_record(engine,project_id,dataset)
+    names=value.setdefault('tables',{}).setdefault(dataset,{'':DEFAULT_NAME})
+    if any(key!=table_id and label.casefold()==name.casefold() for key,label in names.items()):
+        raise ValueError('当前数据集已有同名结果表')
+    names[table_id]=name
+    return value
+
+
+def table_name(value):
+    name=text(value,80,'表名')
+    if not name or any(ord(c)<32 for c in name):raise ValueError('请填写有效表名')
+    return name
+
+
+def visible_fields(value):
+    allowed={'label',*DEFAULT_FIELDS}
+    if not isinstance(value,list) or not all(isinstance(v,str) and v in allowed for v in value) or len(set(value))!=len(value):
+        raise ValueError('结果表显示字段无效')
+    return value
+
+
+def persist(engine,value):
+    catalog=register_name(engine,value['project_id'],value['dataset'],value['table_id'],value['name'])
+    engine.store.put_many([('result_tables',value),('result_table_scopes',catalog)])
+    return value
+
+
+def create(engine,project_id,dataset,data):
+    engine.store.get('projects',project_id)
+    if not isinstance(data,dict):raise ValueError('请提供结果表设置')
+    dataset=dataset_name(dataset);table_id=identifier(data.get('table_id'));name=table_name(data.get('name'))
+    key=table_key(project_id,dataset,table_id)
+    with engine.store.lock:
+        try:return engine.store.get('result_tables',key)
+        except ValueError:pass
+        columns,rows=validate(engine,project_id,{'columns':data.get('columns',[]),'rows':[]},{'rows':[],'table_id':table_id})
+        value={'id':key,'project_id':project_id,'dataset':dataset,'table_id':table_id,'name':name,
+               'fields':visible_fields(data.get('fields',['label','group','task'])),'revision':1,
+               'updated_at':time.time(),'columns':columns,'rows':rows}
+        return persist(engine,value)
+
+
+def cell_value(col,value,index):
+    if col.get('type','number')=='text':return text(value,10000,'文本指标')
+    try:
+        if isinstance(value,bool) or not isinstance(value,(int,float,str)):raise ValueError()
+        number=float(value)
+        if not math.isfinite(number):raise ValueError()
+        return number
+    except (ValueError,TypeError,OverflowError):
+        raise ValueError(f'第 {index+1} 行「{col["name"]}」须为有限数值；缺失结果请留空') from None
+
+
 def validate(engine,project_id,data,previous):
     columns=data.get('columns');rows=data.get('rows')
-    if not isinstance(columns,list) or not 1<=len(columns)<=MAX_COLUMNS:raise ValueError('请保留 1–24 个指标列')
+    minimum=0 if previous.get('table_id') else 1
+    if not isinstance(columns,list) or not minimum<=len(columns)<=MAX_COLUMNS:raise ValueError(f'请保留 {minimum}–24 个指标列')
     if not isinstance(rows,list) or len(rows)>MAX_ROWS:raise ValueError('每张数据集结果表最多整理 5000 条结果记录')
     clean_columns=[];seen=set();names=set()
     for col in columns:
@@ -92,14 +160,7 @@ def validate(engine,project_id,data,previous):
         for col in clean_columns:
             value=cells.get(col['id'])
             if value is None or value=='':continue
-            if col['type']=='number':
-                try:
-                    if isinstance(value,bool) or not isinstance(value,(int,float,str)):raise ValueError()
-                    value=float(value)
-                    if not math.isfinite(value):raise ValueError()
-                except (ValueError,TypeError,OverflowError):raise ValueError(f'第 {index+1} 行「{col["name"]}」须为有限数值；缺失结果请留空') from None
-            else:value=text(value,10000,'文本指标')
-            values[col['id']]=value
+            values[col['id']]=cell_value(col,value,index)
         task_id=row.get('task_id') or None;attempt=row.get('attempt_id') or None;snapshot=None
         if task_id:
             if not isinstance(task_id,str):raise ValueError('关联实验无效')
@@ -114,25 +175,36 @@ def validate(engine,project_id,data,previous):
                 snapshot={'id':task_id,'name':task['name'],'seq':task['seq']}
         elif attempt:raise ValueError('请先关联实验再选择运行')
         clean_rows.append({'id':key,'group':group,'seed':seed,'task_id':task_id,'attempt_id':attempt,'task_snapshot':snapshot,'values':values,'notes':text(row.get('notes',''),100000,'备注')})
+        if row.get('label'):clean_rows[-1]['label']=text(row['label'],200,'行名')
+        old=prior.get(key,{})
+        old_sources=old.get('sources',{})
+        sources=row.get('sources',old_sources)
+        if not isinstance(sources,dict):raise ValueError('指标来源须为对象')
+        sources={k:text(v,1000,'指标来源') for k,v in sources.items() if k in values and
+                 (v!=old_sources.get(k) or (values[k]==old.get('values',{}).get(k) and
+                  (task_id,attempt)==(old.get('task_id'),old.get('attempt_id'))))}
+        if sources:clean_rows[-1]['sources']=sources
     return clean_columns,clean_rows
 
 
-def save(engine,project_id,data,dataset=''):
+def save(engine,project_id,data,dataset='',table_id=''):
     dataset=dataset_name(dataset)
     if not isinstance(data,dict):raise ValueError('结果表须为对象')
     if 'dataset' in data and data['dataset']!=dataset:raise ValueError('保存的数据集与当前结果表不一致，请重新打开对应结果表')
+    if data.get('table_id',table_id)!=table_id:raise ValueError('保存目标与当前结果表不一致')
     if len(json.dumps({'columns':data.get('columns'),'rows':data.get('rows')},ensure_ascii=False).encode('utf-8'))>12*1024**2:raise ValueError('结果表最多 12 MB，请减少长备注或记录数')
     revision=data.get('revision');request_id=data.get('request_id')
     if type(revision)!=int or revision<0:raise ValueError('缺少有效的结果表版本')
     if request_id is not None:identifier(request_id)
     with engine.store.lock:
-        previous=read(engine,project_id,dataset)
+        previous=read(engine,project_id,dataset,table_id)
+        name=table_name(data.get('name',previous['name']))
+        fields=visible_fields(data.get('fields',previous['fields']))
         columns,rows=validate(engine,project_id,data,previous)
-        if request_id and previous.get('request_id')==request_id and previous['columns']==columns and previous['rows']==rows:return previous
+        if request_id and previous.get('request_id')==request_id and previous['columns']==columns and previous['rows']==rows and previous['name']==name and previous['fields']==fields:return previous
         if revision!=previous['revision']:raise Conflict('结果表已被其他页面更新，本页草稿已保留。请导出草稿后重新载入，避免覆盖他人的修改。')
-        value={'id':table_key(project_id,dataset),'project_id':project_id,'dataset':dataset,'revision':revision+1,'updated_at':time.time(),'request_id':request_id,'columns':columns,'rows':rows}
-        engine.store.put_many([('result_tables',value),('result_table_scopes',scope_record(engine,project_id,dataset))])
-        return value
+        value={**previous,'revision':revision+1,'updated_at':time.time(),'request_id':request_id,'columns':columns,'rows':rows,'name':name,'fields':fields}
+        return persist(engine,value)
 
 
 def assign_dataset(engine,project_id,data):
@@ -147,11 +219,13 @@ def assign_dataset(engine,project_id,data):
         if target.get('assignment_request_id')==request_id:return target
         if original['revision']!=revision:raise Conflict('原结果表已被其他页面更新，请重新载入后再指定数据集。')
         if target['revision']:raise Conflict('该数据集已有结果表，请切换后查看；不会覆盖已有指标或记录。')
-        target.update(columns=copy.deepcopy(original['columns']),rows=copy.deepcopy(original['rows']),revision=1,
+        catalog=register_name(engine,project_id,dataset,'',original['name'])
+        catalog.setdefault('tables',{}).setdefault('',{})['']=DEFAULT_NAME
+        target.update(columns=copy.deepcopy(original['columns']),rows=copy.deepcopy(original['rows']),name=original['name'],fields=original['fields'],revision=1,
                       updated_at=time.time(),assignment_request_id=request_id)
-        empty={**original,'columns':copy.deepcopy(DEFAULT_COLUMNS),'rows':[],'revision':revision+1,'updated_at':time.time()}
+        empty={**original,'columns':copy.deepcopy(DEFAULT_COLUMNS),'rows':[],'name':DEFAULT_NAME,'fields':DEFAULT_FIELDS.copy(),'revision':revision+1,'updated_at':time.time()}
         empty.pop('request_id',None)
-        engine.store.put_many([('result_tables',target),('result_tables',empty),('result_table_scopes',scope_record(engine,project_id,dataset))])
+        engine.store.put_many([('result_tables',target),('result_tables',empty),('result_table_scopes',catalog)])
         return target
 
 
@@ -171,9 +245,43 @@ def summarize(table):
                 except (OverflowError,ValueError):std=None
                 values[col['id']]={'n':len(items),'mean':mean,'std':std}
             else:values[col['id']]={'n':len(items),'text':list(dict.fromkeys(items))}
-        result.append({'key':kind+':'+key,'name':rows[0]['group'] or '未分组记录','row_ids':[r['id'] for r in rows],
+        result.append({'key':kind+':'+key,'name':rows[0]['group'] or rows[0].get('label') or '未分组记录','row_ids':[r['id'] for r in rows],
                        'seeds':[r['seed'] for r in rows if r['seed']],'count':len(rows),'values':values})
     return result
+
+
+def chart_data(table,metric_ids,group_keys,mode,offset,limit):
+    if mode not in ('bar','line','point','box'):raise ValueError('不支持的图形类型')
+    if offset<0 or not 1<=limit<=200:raise ValueError('分页范围无效，每页 1–200 组')
+    numeric=[c for c in table['columns'] if c['type']=='number']
+    selected=set(metric_ids)
+    if selected-{c['id'] for c in numeric}:raise ValueError('请选择本表中的数值指标 ID')
+    columns=[c for c in numeric if not selected or c['id'] in selected]
+    groups=summarize({**table,'columns':columns})
+    keys=set(group_keys)
+    if keys-{g['key'] for g in groups}:raise ValueError('实验组不属于当前结果表')
+    matched=[g for g in groups if not keys or g['key'] in keys]
+    best={}
+    for c in columns:
+        values=[g['values'][c['id']]['mean'] for g in matched if g['values'][c['id']]['n']]
+        if len(values)>1 and c['direction']!='none':
+            best[c['id']]=(max if c['direction']=='max' else min)(values)
+    rows={r['id']:r for r in table['rows']}
+    page=[]
+    for group in matched[offset:offset+limit]:
+        values=group['values']
+        for metric,stat in values.items():
+            stat['best']=metric in best and stat['mean']==best[metric]
+            if mode=='box' and stat['n']:
+                data=sorted(rows[k]['values'][metric] for k in group['row_ids'] if metric in rows[k]['values'])
+                def percentile(fraction):
+                    pos=(len(data)-1)*fraction
+                    share=pos%1
+                    return data[int(pos)]*(1-share)+data[math.ceil(pos)]*share
+                stat.update(min=data[0],q1=percentile(.25),median=percentile(.5),q3=percentile(.75),max=data[-1])
+        page.append({'key':group['key'],'name':group['name'],'values':values})
+    return {'table_id':table['table_id'],'dataset':table['dataset'],'revision':table['revision'],'mode':mode,
+            'metrics':columns,'groups':page,'total':len(matched),'offset':offset,'limit':limit}
 
 
 def export_csv(table,summary=False):
@@ -194,7 +302,8 @@ def export_csv(table,summary=False):
                 item=group['values'][col['id']];line.extend([item['mean'],item['std'],item['n']] if col['type']=='number' else [' / '.join(item['text'])])
             writer.writerow([safe(v) for v in line])
     else:
-        writer.writerow([safe(v) for v in ['数据集','关联实验编号','关联实验','实验 ID','运行 ID','实验组别','Seed',*[labels[c['id']] for c in table['columns']],'备注']])
+        row_names='label' in table.get('fields',[]) or any(r.get('label') for r in table['rows'])
+        writer.writerow([safe(v) for v in ['数据集',*(['行名'] if row_names else []),'关联实验编号','关联实验','实验 ID','运行 ID','实验组别','Seed',*[labels[c['id']] for c in table['columns']],'备注']])
         for row in table['rows']:
-            task=row.get('task_snapshot') or {};writer.writerow([safe(v) for v in [table.get('dataset') or '未指定数据集',task.get('seq',''),task.get('name',''),row['task_id'],row['attempt_id'],row['group'],row['seed'],*[row['values'].get(c['id'],'') for c in table['columns']],row['notes']]])
+            task=row.get('task_snapshot') or {};writer.writerow([safe(v) for v in [table.get('dataset') or '未指定数据集',*([row.get('label','')] if row_names else []),task.get('seq',''),task.get('name',''),row['task_id'],row['attempt_id'],row['group'],row['seed'],*[row['values'].get(c['id'],'') for c in table['columns']],row['notes']]])
     return ('\ufeff'+buffer.getvalue()).encode('utf-8')

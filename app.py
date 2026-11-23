@@ -149,7 +149,7 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
         active_uploads=BUSY
         visible_uploads=[uploads.public(u) for i,u in enumerate(all_uploads) if i>=len(all_uploads)-100 or u['status'] in active_uploads]
         visible_jobs=[public_job(j) for j in all_jobs]
-        return jsonify(runtime_features={'async_runtime':True,'task_environments':True,'content_store':True,'batch_states':True,'batch_queue':True,'import_configuration':True,'project_archive':True,'task_archive':True,'result_tables':True,'result_dataset_tables':True,'dataset_notes':True,'code_sync':True},code_sources=engine.store.all('code_sources'),servers=servers,projects=engine.store.all('projects'),tasks=tasks,notes=engine.store.summaries('notes'),storage=[engine.current_sharing(scope) for scope in ('work','data')],local_storage=local_storage.info(),uploads=visible_uploads,datasets=datasets,replicas=engine.store.summaries('replicas'),jobs=visible_jobs,settings=engine.settings,events=engine.store.events())
+        return jsonify(runtime_features={'async_runtime':True,'task_environments':True,'content_store':True,'batch_states':True,'batch_queue':True,'import_configuration':True,'project_archive':True,'task_archive':True,'result_tables':True,'result_dataset_tables':True,'named_result_tables':True,'dataset_notes':True,'code_sync':True},code_sources=engine.store.all('code_sources'),servers=servers,projects=engine.store.all('projects'),tasks=tasks,notes=engine.store.summaries('notes'),storage=[engine.current_sharing(scope) for scope in ('work','data')],local_storage=local_storage.info(),uploads=visible_uploads,datasets=datasets,replicas=engine.store.summaries('replicas'),jobs=visible_jobs,settings=engine.settings,events=engine.store.events())
 
     @app.get('/api/experiment-guide')
     def experiment_guide():
@@ -394,13 +394,46 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
     @app.get('/api/projects/<project_id>/results')
     def project_results_read(project_id):
         from scheduler.result_tables import read,summarize
-        value=read(engine,project_id,request.args.get('dataset',''))
+        value=read(engine,project_id,request.args.get('dataset',''),request.args.get('table',''))
         return jsonify(**value,summary=summarize(value))
+
+    @app.route('/api/projects/<project_id>/results/tables',methods=['GET','POST'])
+    def project_result_tables(project_id):
+        from scheduler.result_tables import table_list,create
+        dataset=request.args.get('dataset','')
+        if request.method=='POST':
+            return jsonify(create(engine,project_id,dataset,request.get_json()))
+        return jsonify(tables=table_list(engine,project_id,dataset))
 
     @app.get('/api/projects/<project_id>/results/datasets')
     def project_results_datasets(project_id):
         from scheduler.result_tables import scopes
         return jsonify(scopes(engine,project_id))
+
+    @app.get('/api/projects/<project_id>/results/runs')
+    def project_result_runs(project_id):
+        from scheduler.result_collection import run_list
+        return jsonify(run_list(engine,project_id,int(request.args.get('offset',0)),int(request.args.get('limit',100))))
+
+    @app.get('/api/projects/<project_id>/results/runs/<task_id>/<attempt_id>/evidence')
+    def project_result_evidence(project_id,task_id,attempt_id):
+        from scheduler.result_collection import evidence
+        return jsonify(evidence(engine,project_id,task_id,attempt_id,request.args.get('path',''),
+                                request.args.get('log')=='1',int(request.args.get('offset',0)),int(request.args.get('limit',32768))))
+
+    @app.post('/api/projects/<project_id>/results/merge')
+    def project_result_merge(project_id):
+        from scheduler.result_collection import merge
+        if request.content_length and request.content_length>12*1024**2:abort(413,description='单次结果提交最多 12 MB')
+        return jsonify(merge(engine,project_id,request.args.get('dataset',''),request.get_json()))
+
+    @app.get('/api/projects/<project_id>/results/chart-data')
+    def project_result_chart_data(project_id):
+        from scheduler.result_tables import read,chart_data
+        args=request.args
+        doc=read(engine,project_id,args.get('dataset',''),args.get('table',''))
+        return jsonify(chart_data(doc,args.getlist('metric'),args.getlist('group'),args.get('mode','bar'),
+                                  int(args.get('offset',0)),int(args.get('limit',100))))
 
     @app.post('/api/projects/<project_id>/results/assign-dataset')
     def project_results_assign_dataset(project_id):
@@ -411,14 +444,19 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
     def project_results_save(project_id):
         from scheduler.result_tables import save
         if request.content_length and request.content_length>12*1024**2:abort(413,description='结果表最多 12 MB，请减少长备注或记录数')
-        return jsonify(save(engine,project_id,request.get_json(),request.args.get('dataset','')))
+        return jsonify(save(engine,project_id,request.get_json(),request.args.get('dataset',''),request.args.get('table','')))
 
     @app.get('/api/projects/<project_id>/results/export')
     def project_results_export(project_id):
         from scheduler.result_tables import read,export_csv
         view=request.args.get('view','rows')
         if view not in ('rows','summary'):raise ValueError('未知导出范围')
-        return Response(export_csv(read(engine,project_id,request.args.get('dataset','')),view=='summary'),mimetype='text/csv',headers={'Content-Disposition':'attachment; filename="project-results-'+view+'.csv"'})
+        table=read(engine,project_id,request.args.get('dataset',''),request.args.get('table',''))
+        response=Response(export_csv(table,view=='summary'),mimetype='text/csv')
+        from urllib.parse import quote
+        filename=quote(table['name']+'-'+view+'.csv',safe='')
+        response.headers['Content-Disposition']=f"attachment; filename=\"project-results-{view}.csv\"; filename*=UTF-8''{filename}"
+        return response
 
     @app.post('/api/projects/<project_id>/tasks')
     def tasks(project_id):

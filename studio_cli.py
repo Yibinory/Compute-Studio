@@ -4,11 +4,12 @@ import http.cookiejar
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from urllib.request import (
     HTTPCookieProcessor, HTTPRedirectHandler, ProxyHandler, Request, build_opener,
 )
@@ -159,8 +160,42 @@ def commit(client, batch_id, revision, wait):
     return wait_for(client, result['id'], wait, batch_id=batch_id)
 
 
+def result_command(client,args):
+    pid=args.project if re.fullmatch('[a-f0-9]{32}',args.project) else project_id(client.json('/api/state')['projects'],args.project)
+    base='/api/projects/'+part(pid)
+    def get(suffix,**params):
+        return client.json(base+suffix+'?'+urlencode(params,doseq=True))
+    if args.command=='result-runs':
+        return get('/results/runs',offset=args.offset,limit=args.limit)
+    if args.command=='result-files':
+        return get('/runs/'+part(args.attempt)+'/files',scope='outputs',query=args.query,offset=args.offset,limit=args.limit)
+    if args.command=='result-evidence':
+        selector={'log':1} if args.log else {'path':args.path}
+        return get('/results/runs/'+part(args.task)+'/'+part(args.attempt)+'/evidence',offset=args.offset,limit=args.limit,**selector)
+    if args.command=='result-tables':
+        if args.dataset is not None:return get('/results/tables',dataset=args.dataset)
+        scopes=get('/results/datasets')
+        by_dataset={d:get('/results/tables',dataset=d)['tables'] for d in ['',*scopes['saved_datasets']]}
+        return {'project_id':pid,**scopes,'tables_by_dataset':by_dataset}
+    if args.command=='result-show':
+        doc=get('/results',dataset=args.dataset,table=args.table)
+        if args.row_id:
+            wanted=set(args.row_id)
+            doc['rows']=[r for r in doc['rows'] if r['id'] in wanted]
+            if len(doc['rows'])!=len(wanted):raise StudioError('未找到请求的全部结果行')
+            doc.pop('summary',None)
+        return doc
+    if args.command=='result-chart':
+        return get('/results/chart-data',dataset=args.dataset,table=args.table,metric=args.metric,group=args.group,
+                   mode=args.mode,offset=args.offset,limit=args.limit)
+    raw=sys.stdin.buffer.read() if args.file=='-' else Path(args.file).read_bytes()
+    return client.json(base+'/results/merge?'+urlencode({'dataset':args.dataset}),json.loads(raw.decode('utf-8-sig')))
+
+
 def run(client, args):
     cmd = args.command
+    if cmd.startswith('result-'):
+        return result_command(client,args)
     if cmd == 'job':
         return job_result(client, args.id, args.wait)
     if cmd == 'commit':
@@ -203,6 +238,36 @@ def parser():
     cli.add_argument('--port', type=int, help='控制器本机端口（正式工作空间默认 8776）')
     cli.add_argument('--data-dir', type=Path, help='控制器本次使用的保存目录')
     commands = cli.add_subparsers(dest='command', required=True)
+    runs=commands.add_parser('result-runs',help='列出项目可整理的成功运行（含历史）')
+    files=commands.add_parser('result-files',help='列出指定运行的本机回传文件')
+    evidence=commands.add_parser('result-evidence',help='分段读取本机回传的指标文件或日志')
+    catalog=commands.add_parser('result-tables',help='查找已有数据集与结果表')
+    show=commands.add_parser('result-show',help='读取结果表和分组汇总，或核对指定行')
+    merge=commands.add_parser('result-merge',help='按运行和观测键合并实测结果，可重复执行')
+    chart=commands.add_parser('result-chart',help='读取筛选后的绘图数据、样本数和最佳均值')
+    for action in (runs,files,evidence,catalog,show,merge,chart):
+        action.add_argument('--project',required=True,help='完整项目 ID 或唯一名称')
+    for action in (runs,files,evidence,chart):
+        action.add_argument('--offset',type=int,default=0)
+        action.add_argument('--limit',type=int,default=32768 if action is evidence else 100)
+    for action in (files,evidence):
+        action.add_argument('--attempt',required=True,help='运行 ID')
+    files.add_argument('--query',default='',help='按产物相对路径筛选')
+    evidence.add_argument('--task',required=True,help='实验 ID')
+    evidence_source=evidence.add_mutually_exclusive_group(required=True)
+    evidence_source.add_argument('--path',help='回传产物的相对路径')
+    evidence_source.add_argument('--log',action='store_true',help='读取已回传的本机日志')
+    catalog.add_argument('--dataset',help='只列出指定数据集的表')
+    show.add_argument('--dataset',default='')
+    show.add_argument('--table',default='',help='结果表 ID，省略时读取默认表')
+    show.add_argument('--row-id',action='append',help='只核对所列行，可多次传入')
+    chart.add_argument('--dataset',default='')
+    chart.add_argument('--table',default='')
+    chart.add_argument('--mode',choices=('bar','line','point','box'),default='bar')
+    chart.add_argument('--metric',action='append',default=[],help='数值列 ID，可重复')
+    chart.add_argument('--group',action='append',default=[],help='汇总中的组 key，可重复')
+    merge.add_argument('--dataset',default='',help='结果所属数据集')
+    merge.add_argument('file',help='UTF-8 JSON 观测文件，使用 - 从标准输入读取')
     commands.add_parser('projects', help='列出项目、ID 与归档状态')
     tasks = commands.add_parser('tasks', help='查看实验状态')
     tasks.add_argument('--project', help='按项目名称或 ID 筛选')

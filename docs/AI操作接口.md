@@ -66,6 +66,13 @@ python studio_cli.py log $trainId
 | `queue 实验ID` | 将指定实验入队，返回其实验 ID 和状态。运行进度通过 `tasks` 查询。 |
 | `log 实验ID` | 返回近期日志 `text`。并发读取时可能返回 `pending: true`，稍后再查。 |
 | `job 作业ID [--wait 秒数]` | 查询导入、提交等后台作业。进行中返回 `id`、`status` 等字段，成功时在 `result` 中返回业务结果。 |
+| `result-tables --project 项目 [--dataset 数据集]` | 查询表名与表 ID。省略数据集会返回已保存的各数据集及默认表目录。 |
+| `result-runs --project 项目 [--offset 0 --limit 100]` | 分页列出当前成功运行及成功回传的历史运行，返回实验 ID、运行 ID、当前实验配置的数据集和回传时间。 |
+| `result-files --project 项目 --attempt 运行ID [--query 路径片段] [--offset 0 --limit 100]` | 列出本机回传产物的相对路径与大小。省略筛选可遍历全部输出。 |
+| `result-evidence --project 项目 --task 实验ID --attempt 运行ID (--path 相对路径 或 --log) [--offset 0 --limit 32768]` | 按字节分段读取文本产物或本机日志，返回 `text`、`next_offset`、`has_more` 和来源路径。 |
+| `result-merge --project 项目 [--dataset 数据集] 观测.json` | 按运行与观测键新增或补齐指标，自动创建所需命名表。传 `-` 可从标准输入读取 UTF-8 JSON。 |
+| `result-show --project 项目 [--dataset 数据集 --table 表ID] [--row-id 行ID]` | 回读结果。可重复传行 ID 核对本次写入；省略时也返回分组统计。 |
+| `result-chart --project 项目 [--dataset 数据集 --table 表ID] [--mode box --metric auc --group group:基线]` | 返回数值指标、组别与绘图数据；可重复指定指标和组，支持 `--offset` 与 `--limit`。 |
 
 批量配置中用 `key` 标识本批实验，用 `depends_on` 描述依赖，`script` 和 `files` 指向实验脚本及专属输入。新建实验前可检查配置指南和完整样例。[实验脚本与批量配置指导](./实验脚本与批量配置指导.md) · [示例 experiments.json](../examples/batch-experiments/experiments.json)
 
@@ -131,6 +138,66 @@ for dataset in client.json("/api/state")["datasets"]:
 | `POST /api/datasets/{dataset_id}/verify` | 传 `{}`，为已有副本发起仅核验作业，返回作业 `id`。核验差异可在作业错误及副本状态中查看。 |
 
 **用户要求“确保没有遗漏”时**，用原始目录或 ZIP 的预期文件清单做基准。按实际返回条数递增 `offset`，读完数据集清单的全部 `total_count` 项。逐项比对相对路径、字节数、SHA-256，同时检查缺失和多出的路径。用户还要求核对服务器时，在同步结束后调用 `verify`，查到该核验作业 `success`，再检查每台目标服务器的 `replica.status` 为 `success` 及其 `verified_at`。向用户报告预期与实得文件数、总字节数、差异和核验过的服务器。仅完成本机导入时，报告本机结果并注明服务器进度。
+
+传输详情中的哈希和时间表示该次作业的实际观测。同一文件在多台服务器核验通过时，接口仍分别返回各服务器的记录。需要确认现在的文件内容时，发起新的 `verify` 作业。数据结构与维护流程见[项目架构与存储](./项目架构与存储.md)。
+
+## 操作项目结果表
+
+令 `P=/api/projects/{project_id}/results`。下面操作通过本机会话鉴权，写请求使用相同的 CSRF 机制。查询参数里的数据集名称须做 URL 编码。
+
+- `GET P/tables?dataset=名称` 列出本数据集的表名和稳定的 `table_id`。空 ID 表示原默认表。
+- `POST P/tables?dataset=名称` 创建表。请求示例为 `{"table_id":"ablation_01","name":"消融实验","columns":[{"id":"f1","name":"F1","type":"number","direction":"max"}],"fields":["label","group","task"]}`。为每张新表生成独立 ID，重试同一次创建沿用该 ID。可传空指标列表。
+- `GET P?dataset=名称&table=表ID` 返回该表的版本、行列及分组汇总。写入同一路径使用 POST，发送当前 `revision`、新的 `request_id`、完整 `columns` 和 `rows`。可同时更新 `name` 与 `fields`。行可填写 `label`、`group`、`seed`、`values`、`notes`，关联实验时填写 `task_id` 和可选的 `attempt_id`。行和列的数组顺序对应表内顺序。收到 409 时重新读取并核对差异。
+- `GET P/export?dataset=名称&table=表ID&view=summary` 导出分组统计，`view=rows` 导出逐行数据。省略 `table` 会访问该数据集的默认表。
+
+## 自动整理项目结果
+
+项目卡片的「复制 AI 提示词」提供项目名称、完整 ID、控制器端口和工作空间目录。AI 按你随后给出的任务操作。任务产生新结果时，直接使用该次实验和运行 ID 读取产物、整理入表；你明确要求补整理历史结果时，再按指定范围查找历史运行。网页表格和图表共用整理后的数据。下列示例中的 `$projectId`、`$taskId`、`$attemptId`、`$tableId` 和路径均以实际回执替换。演示或自定义工作空间须沿用提示词里的全局参数。
+
+1. **确认运行和目标表。** 用 `projects` 核对完整项目 ID，用 `result-tables` 找到目标表。已有本次运行 ID 时直接读取其文件。按要求查找历史运行时使用 `result-runs`。运行和文件清单每页最多 200 项，按返回条数递增偏移，直到达到 `total`。标记 `current=false` 的记录来自历史运行，当前实验的数据集配置仅供定位，旧运行的实际数据集和设置仍应从产物核实。若同一 Seed 重跑，区分运行并核对采用哪次测量。
+2. **读证据。** 优先读取小型评估汇总。先找 JSON、CSV、TSV、报告等输出，筛选无匹配时再列全部输出。文本按实际格式解析，`has_more=true` 时从 `next_offset` 继续。未找到产物时可读取已回传日志。若 `log_tail_snapshot=true`，读到的是历史日志尾部快照。运行状态、文件名和训练进度不足以证明最终指标，证据不明确时在回执列明原因。
+
+```powershell
+python studio_cli.py result-runs --project $projectId --limit 100
+python studio_cli.py result-files --project $projectId --attempt $attemptId --query metrics
+python studio_cli.py result-evidence --project $projectId --task $taskId --attempt $attemptId --path "outputs/metrics.json"
+```
+
+3. **选择可比的表并合并。** 按数据集、划分、指标定义和单位核对已有表。完整基线、消融和探索性尝试可独立建表。对于已有表，先用 `result-show` 取列 ID、既有绑定和统计口径。每条观测使用实际的实验 ID、运行 ID 和稳定的 `key`。例如同一运行输出多个划分或 Seed，可分别使用 `test/seed42`、`validation/seed42`。保留原单位和精度，省略缺失指标；已有的跨 Seed 汇总不能当作多个原始观测。下面是提交格式示例，示例数值须换成实际读到的值。
+
+```json
+{
+  "name": "测试集基线",
+  "columns": [{"id":"auc","name":"AUROC","type":"number","direction":"max","precision":4,"unit":""}],
+  "rows": [{
+    "task_id": "实际实验ID", "attempt_id": "实际运行ID", "key": "test/seed42",
+    "label": "模型 A · Seed 42", "group": "模型 A / test", "seed": "42",
+    "values": {"auc": 0.9127}, "sources": {"auc": "outputs/metrics.json#test.auroc"}
+  }]
+}
+```
+
+将内容写入 UTF-8 编码的 `observations.json`，再执行下列命令。一次提交对应一张表。首次可传 `name` 来定位或新建同名表，后续优先用回执的 `table_id` 代替 `name`，这样表被改名后仍能定位。所有指标可共用一条 `source`，也可用 `sources` 分别标注文件和 JSON 字段、CSV 行列或日志行。来源是整理者核实后写下的引用。退出码非零时检查错误回执。
+
+```powershell
+$receipt = python studio_cli.py result-merge --project $projectId --dataset ECG observations.json | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw '合并失败，请核对回执' }
+$tableId = $receipt.table_id
+python studio_cli.py result-show --project $projectId --dataset ECG --table $tableId --row-id $receipt.row_ids[0]
+python studio_cli.py result-chart --project $projectId --dataset ECG --table $tableId --mode box --metric auc
+```
+
+4. **核对并报告。** 按回执的全部 `row_ids` 回读，核对运行关联、数值和来源。报告各表的 `created`（新增）、`updated`（补齐）、`unchanged`（已有）以及跳过或冲突的运行。同表、同运行、同观测键的相同数据可安全重试。遇到同一运行的手工行时，先核实它是否就是该观测，再传该行的 `row_id` 补齐空值。已有非空值、关联或组别冲突时，整次合并不会写入；先报告差异。人工作出更正决定后，可以使用普通结果表的版本化保存接口。
+
+### 整理与图表的 HTTP 接口
+
+| 方法与路径 | 请求与响应 |
+| --- | --- |
+| `GET P/runs?offset=0&limit=100` | 成功运行清单，返回 `runs`、`total`、`offset`、`limit`。 |
+| `GET /api/projects/{project_id}/runs/{attempt_id}/files?scope=outputs&query=metrics&offset=0&limit=100` | 既有回传产物目录，返回 `files` 与分页总数 `total`。 |
+| `GET P/runs/{task_id}/{attempt_id}/evidence?path=outputs%2Fmetrics.json&offset=0&limit=32768` | 校验项目、实验、成功运行和输出归属后，读取已回传文本。将 `path` 换为 `log=1` 可读取本机日志。每次最多 131072 字节。 |
+| `POST P/merge?dataset=ECG` | 请求体为上述观测对象。返回 `project_id`、`dataset`、`table_id`、`name`、`revision`、计数与按请求顺序排列的 `row_ids`。单表原子提交，认证和 CSRF 与网页一致。 |
+| `GET P/chart-data?dataset=ECG&table=表ID&mode=box&metric=auc` | `mode` 支持 `bar/line/point/box`。可重复传 `metric`（列 ID）、`group`（表内汇总的 `key`）。`metrics` 带单位和方向，`groups[].values` 带有效 n、均值、样本标准差和最佳均值标志。箱线图额外返回最小值、Q1、中位数、Q3、最大值。最佳值以全部匹配组为范围；并列最佳全部标记，少于两个有效组时不标记。分页参数与运行清单相同。 |
 
 ## 可以直接交给 AI 的指令
 
