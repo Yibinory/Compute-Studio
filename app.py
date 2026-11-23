@@ -162,6 +162,14 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
     @app.get('/api/projects/<project_id>/source')
     def code_source_read(project_id):return jsonify(engine.code_sources.get(project_id))
 
+    @app.post('/api/projects/<project_id>/source/initialize')
+    @app.post('/api/projects/<project_id>/source/initialize-at')
+    def code_source_initialize(project_id):
+        data = request.get_json()
+        if not isinstance(data, dict):
+            raise ValueError('请提供包含源码目录 path 的 JSON 对象')
+        return jsonify(engine.code_sources.initialize(project_id, data.get('path')))
+
     @app.post('/api/projects/<project_id>/source')
     def code_source_config(project_id):
         value=engine.code_sources.configure(project_id,request.get_json() or {})

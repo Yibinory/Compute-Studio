@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -14,6 +15,12 @@ import pytest
 from scheduler.engine import Engine
 from scheduler.files import confined, digest, manifest
 from scheduler.remote import Remote
+
+
+@pytest.fixture
+def ai_workspace():
+    with tempfile.TemporaryDirectory(prefix='studio-editor-') as folder:
+        yield Path(folder)
 
 
 class LocalSFTP:

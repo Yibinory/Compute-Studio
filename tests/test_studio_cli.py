@@ -18,11 +18,11 @@ def cli(client):
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
 
-    def invoke(*args, ok=True):
+    def invoke(*args, ok=True, cwd=None):
         completed = subprocess.run(
             [sys.executable, str(ROOT / 'studio_cli.py'), '--port', str(server.server_port),
              '--data-dir', str(root), *map(str, args)],
-            capture_output=True, text=True, encoding='utf-8', timeout=40)
+            capture_output=True, text=True, encoding='utf-8', timeout=40, cwd=cwd)
         assert (completed.returncode == 0) == ok, completed.stderr
         assert (root / 'access-token.txt').read_text() not in completed.stdout + completed.stderr
         return json.loads(completed.stdout if ok else completed.stderr.splitlines()[-1])
@@ -33,6 +33,26 @@ def cli(client):
         server.shutdown()
         thread.join()
         server.server_close()
+
+
+def test_source_cli_checks_binding_and_publishes_code(cli, client, ai_workspace):
+    _, app = client
+    engine = app.extensions['engine']
+    engine.code_sources.settle_seconds = 0
+    pid = engine.create_project({'name': 'SourceDemo'})['id']
+    assert cli('source-status', '--project', pid)['path'] == ''
+    editor = ai_workspace / 'my code'
+    editor.mkdir()
+    (editor / 'train.py').write_text('version = 1')
+    reply = cli('source-init', '--project', 'SourceDemo', '--path', 'my code', cwd=ai_workspace)
+    assert reply['outcome'] == 'created'
+    assert reply['source']['path'] == str(editor)
+    reused = cli('source-init', '--project', pid, '--path', 'other', cwd=ai_workspace)
+    assert reused['outcome'] == 'existing' and reused['source']['path'] == str(editor)
+    assert not (ai_workspace / 'other').exists()
+    synced = cli('source-sync', '--project', pid)
+    assert synced['revision'] == cli('source-status', '--project', pid)['revision']
+    assert (engine.local_project(pid) / 'code/train.py').read_text() == (editor / 'train.py').read_text()
 
 
 def test_agent_imports_visible_in_existing_browser_session(cli, client):

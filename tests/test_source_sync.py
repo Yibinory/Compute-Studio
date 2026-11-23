@@ -1,5 +1,6 @@
 import json
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,60 @@ def source(engine):
 def bind(engine,project,folder):
     engine.code_sources.configure(project['id'],{'path':str(folder),'exclude':[]})
     return engine.code_sources.synchronize(project['id'])
+
+
+def test_source_initialization_once_and_empty_source_sync(engine, ai_workspace):
+    pid = engine.create_project({'name': 'Fresh'})['id']
+    sources = engine.code_sources
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        replies = list(pool.map(sources.initialize, [pid] * 4, [str(ai_workspace / 'code')] * 4))
+    assert sorted(r['outcome'] for r in replies) == ['created', 'existing', 'existing', 'existing']
+    assert len({r['source']['configuration_id'] for r in replies}) == 1
+    editor = Path(replies[0]['source']['path'])
+    assert editor == ai_workspace / 'code'
+    assert editor.is_dir() and engine.root not in editor.parents and not list(editor.iterdir())
+    assert sources.synchronize(pid)['status'] == 'waiting'
+    sources.settle_seconds = 0
+    (editor / 'train.py').write_text('version = 1')
+    assert sources.synchronize(pid)['revision']
+    assert (engine.local_project(pid) / 'code/train.py').read_text() == 'version = 1'
+    (editor / 'train.py').unlink()
+    with pytest.raises(ValueError, match='为空'):
+        sources.synchronize(pid)
+    paused = sources.configure(pid, {'path': str(editor), 'enabled': False})
+    assert sources.initialize(pid) == {'outcome': 'existing', 'source': paused}
+    sources.configure(pid, {'path': ''})
+    assert sources.initialize(pid)['outcome'] == 'skipped'
+
+
+@pytest.mark.parametrize('content', ['code', 'task', 'result', 'archived'])
+def test_source_initialization_leaves_used_projects_alone(engine, content, ai_workspace):
+    pid = engine.create_project({'name': 'Existing'})['id']
+    if content == 'code':
+        (engine.local_project(pid) / 'code/.hidden').touch()
+    elif content == 'task':
+        engine.create_task(pid, {'name': 'planned', 'command': 'echo ok'})
+    elif content == 'result':
+        from scheduler.result_tables import create
+        create(engine, pid, 'sample', {'table_id': 'pilot', 'name': 'Pilot'})
+    else:
+        engine.archive_project(pid, True)
+    target = ai_workspace / 'unused'
+    reply = engine.code_sources.initialize(pid, str(target))
+    assert reply['outcome'] == 'skipped' and reply['reason'] and not reply['source']['path']
+    assert not target.exists()
+
+
+def test_initial_source_path_must_be_an_external_directory(engine, ai_workspace):
+    pid = engine.create_project({'name': 'CheckPaths'})['id']
+    ordinary_file = ai_workspace / 'train.py'
+    ordinary_file.write_text('version = 1')
+    for target in (None, '', 'relative', str(ordinary_file), str(engine.root / 'code'),
+                   str(Path(__file__).resolve().parents[1] / 'new-ai-source')):
+        with pytest.raises(ValueError):
+            engine.code_sources.initialize(pid, target)
+    assert not engine.code_sources.bound(pid)
+    assert ordinary_file.read_text() == 'version = 1'
 
 
 def test_incremental_publish_history_and_noop(engine,setup_project):

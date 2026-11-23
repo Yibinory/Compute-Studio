@@ -16,6 +16,42 @@ python studio_cli.py projects
 
 自定义控制器使用 `python studio_cli.py --port 端口 --data-dir "控制器保存目录" projects`。全局参数放在子命令之前。`--data-dir` 用于定位工作空间凭据，待导入的目录作为子命令的位置参数单独传入。客户端在进程内完成登录，调用方无需复制令牌。
 
+## 实现实验前确定公共代码目录
+
+每次实现实验前，先阅读[实验脚本与批量配置指导](./实验脚本与批量配置指导.md)，按其中的运行目录、输入输出和依赖约定编写公共代码、脚本与 `experiments.json`。本节用于确定代码应写到哪里。以下示例在控制器本机运行，项目 ID、端口和保存目录取自项目卡片复制的提示词。
+
+```powershell
+$projectId = '替换为提示词中的完整项目ID'
+$studioCli = Join-Path '替换为提示词中的算力工坊目录' 'studio_cli.py'
+$sourceDir = '.\code'  # 在 AI 工作目录运行。如果当前目录就是源码根，用 '.'；用户指定目录时直接填该路径
+$controller = @()  # 默认正式工作空间。其他工作空间填入提示词中的全局参数，如 @('--demo', '--port', '8777', '--data-dir', 'D:\DemoData')
+$raw = python $studioCli @controller source-status --project $projectId
+if ($LASTEXITCODE -ne 0) { throw '查询绑定失败，请先核对控制器。' }
+$source = $raw | ConvertFrom-Json
+if (-not $source.path) {
+    $raw = python $studioCli @controller source-init --project $projectId --path $sourceDir
+    if ($LASTEXITCODE -ne 0) { throw '初始化失败，请核对错误和原绑定。' }
+    $binding = $raw | ConvertFrom-Json
+    if ($binding.outcome -eq 'skipped') { Write-Output $binding.reason }
+    $source = $binding.source
+}
+$source | Select-Object path, enabled, status, revision
+```
+
+- **已有绑定**（`path` 有值）：在该目录编辑公共代码，保留原同步开关和排除规则。即使路径暂时不可访问或同步暂停，也应保留绑定。
+- **首次绑定**（`outcome = created`）：CLI 按调用时的工作目录解析 `--path`。控制器绑定该目录并启用自动同步。目录已有源码时原地使用，路径缺失时创建目录。空目录在首次写入前为 `waiting`。返回的 `source.path` 是实际绑定的绝对路径。重复或并发请求返回已有绑定（`existing`），即使后来传入了另一条路径也是如此。
+- **跳过**（`outcome = skipped`）：查看 `reason`。已有受管代码或实验的项目继续按原方式维护，需要导入公共代码时用 `import-code`。已归档、有结果表或副本、有待处理的文件操作，或曾经主动解绑的项目，也会跳过自动绑定。
+
+例如 AI 工作目录为 `D:\Research\Example` 时，可将公共源码放在 `.\code`，批量导入包放在同级的 `.\batch`。若用户直接指定了已有源码根，则使用该路径本身。公共源码写好且自动同步已启用时，运行 `python $studioCli @controller source-sync --project $projectId`，确认返回的 `revision`，再用 `import-experiments` 导入包含 `experiments.json`、脚本与实验专属输入的批量包。保留暂停设置的项目应先向用户核对发布安排。
+
+| 控制器 API | 行为 |
+| --- | --- |
+| `GET /api/projects/{project_id}/source` | 只读查询。返回 `path`、`enabled`、`status` 和已有的 `revision` 等字段。 |
+| `POST /api/projects/{project_id}/source/initialize-at` | 传 `{"path":"D:/Research/Example/code"}`。HTTP 调用使用控制器本机的绝对路径。控制器重新检查绑定和项目内容，返回 `{outcome, source}`，跳过时另有 `reason`。首次自动绑定须选择程序目录和工作空间保存目录以外的源码路径。 |
+| `POST /api/projects/{project_id}/source/sync` | 传 `{}`。立即同步当前绑定，返回 HTTP 202 和作业 ID。CLI 等待该作业，超时后用 `job` 查询。 |
+
+网页配置使用的 `POST /api/projects/{project_id}/source` 可主动更换路径或解绑。AI 的首次自动绑定使用上表中的 `/initialize-at`。若该接口返回 404，请先更新并重启控制器。
+
 ## 从本机目录创建实验草稿
 
 下面用仓库自带的两个实验演示。将 `$projectId` 替换为刚查询到的 ID。用户只要求检查配置时，执行到预览即可。
@@ -58,6 +94,9 @@ python studio_cli.py log $trainId
 | --- | --- |
 | `projects` | 列出项目，返回含 `id`、`name` 和归档信息的数组。 |
 | `create-project 名称 [--description 说明]` | 创建项目，返回含项目 `id` 的记录。 |
+| `source-status --project 项目` | 查询编辑目录和当前同步配置。 |
+| `source-init --project 项目 --path 源码目录` | 为空白且未绑定的项目绑定指定的源码目录，接受绝对路径或相对当前工作目录的路径。 |
+| `source-sync --project 项目 [--wait 秒数]` | 发布绑定目录中的代码，等待同步作业，返回状态和版本。 |
 | `tasks [--project 项目]` | 列出实验，返回 `id`、`project_id`、`seq`、`name`、`status` 等字段。等待原因可见于 `reason`。 |
 | `import-experiments --project 项目 [--preview-only] 目录` | 从目录读取实验配置。返回 `batch_id`、`configuration_revision`、`count` 和 `tasks`。 |
 | `commit 批次ID --revision 修订号` | 按该版预览创建草稿。同一批次已成功时，返回原结果。 |

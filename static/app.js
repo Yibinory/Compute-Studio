@@ -140,17 +140,26 @@ async function copyProjectPrompt(projectId) {
   const {studioRoot, controllerPort} = document.body.dataset;
   const demo = state.settings.demo;
   const ps = value => "'" + String(value).replaceAll("'", "''") + "'";
-  const cli = `python .\\studio_cli.py ${demo ? '--demo ' : ''}--port ${controllerPort} --data-dir ${ps(state.local_storage.root)}`;
+  const cli = `python $studioCli ${demo ? '--demo ' : ''}--port ${controllerPort} --data-dir ${ps(state.local_storage.root)}`;
+  const boundPath = state.code_sources?.find(source => source.id === project.id)?.path;
   const prompt = [
     `这是我在算力工坊${demo ? '演示' : '正式'}工作空间使用的项目。请按我接下来给出的要求操作这个项目。`,
     `项目名称：${project.name}`,
     `项目 ID：${project.id}`,
     `算力工坊目录：${studioRoot}`,
     `工作空间保存目录：${state.local_storage.root}`,
+    ...(boundPath ? [`当前绑定的本机源码目录：${boundPath}`] : []),
     '',
-    '需要操作时，在控制器本机使用 studio_cli.py，接口文档见 docs/AI操作接口.md。可用以下 PowerShell 命令核对项目 ID，后续命令沿用相同的工作空间参数。',
-    `Set-Location -LiteralPath ${ps(studioRoot)}`,
+    '请在我给你的 AI 工作目录中操作。保留当前目录，用以下 PowerShell 命令调用控制器本机的 CLI 并核对项目 ID：',
+    `$studioCli = Join-Path ${ps(studioRoot)} 'studio_cli.py'`,
     `${cli} projects`,
+    '每次实现实验前，先阅读算力工坊程序目录下的 docs/实验脚本与批量配置指导.md 和 docs/AI操作接口.md，再编写公共代码和批量导入包（experiments.json、脚本和实验专属输入）。',
+    '开始写代码前先查询绑定：',
+    `${cli} source-status --project ${project.id}`,
+    '若 path 有值，在该目录编辑并保留原同步设置。若绑定与我指定的位置不同，先告诉我。',
+    "仅当 path 为空时，按我给的源码路径设置 $sourceDir。如果当前 AI 工作目录本身就是源码根，用 $sourceDir = '.'；从空工作目录开始时用 $sourceDir = '.\\code'。然后执行：",
+    `${cli} source-init --project ${project.id} --path $sourceDir`,
+    '在返回的源码目录中编辑公共代码，批量导入包放在源码目录之外。若返回 skipped，沿用该项目已有的受管代码导入方式；不要改绑。源码自动同步已启用时，写完用 source-sync 核对发布版本，再用 import-experiments 导入批量包。',
     '后续用上面的完整项目 ID 指定目标。新建实验时建议使用低干扰模式（level = low_interference）。导入后先保留草稿，等我要求排队时再入队。',
     '执行我的任务时，每次拿到新的实验结果，请自动整理到本项目对应的结果表，并关联产生该结果的实验运行。'
   ].join('\n');

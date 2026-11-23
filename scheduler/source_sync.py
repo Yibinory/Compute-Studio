@@ -34,6 +34,59 @@ class CodeSources:
 
     def bound(self,pid):return bool(self.get(pid).get('path'))
 
+    def initialize(self, pid, path=None):
+        """Bind the caller's editor directory only for an untouched, unbound project."""
+        e = self.engine
+        with e.lock, e.store.lock:
+            current = self.get(pid)
+            if current['path']:
+                return {'outcome': 'existing', 'source': current}
+            reason = self.initialization_blocker(e.store.get('projects', pid), current)
+            if reason:
+                return {'outcome': 'skipped', 'reason': reason, 'source': current}
+
+            if not isinstance(path, str) or not path.strip():
+                raise ValueError('请用 --path 指定 AI 工作目录中的源码路径')
+            target = self.source(path, allow_new=True)
+            install = Path(__file__).resolve().parents[1]
+            if target == install or install in target.parents or target in install.parents:
+                raise ValueError('请在算力工坊程序目录之外选择项目源码目录')
+            for binding in e.store.all('code_sources'):
+                if binding.get('path'):
+                    other = Path(binding['path']).resolve()
+                    if target == other or target in other.parents or other in target.parents:
+                        raise ValueError('目标路径与其他项目的源码目录重叠')
+            created = not target.exists()
+            target.mkdir(parents=True, exist_ok=True)
+            try:
+                value = self.configure(pid, {'path': str(target)}, await_files=True)
+            except Exception:
+                if created and not self.bound(pid) and not any(target.iterdir()):
+                    target.rmdir()
+                raise
+            return {'outcome': 'created', 'source': value}
+
+    def initialization_blocker(self, project, current):
+        e = self.engine
+        pid = project['id']
+        if project.get('archived') or current.get('configuration_id'):
+            return '项目已归档或已有源码配置历史'
+        if e.storage_moving:
+            raise ValueError('保存目录正在迁移')
+        if e.uploads and e.uploads.pending(pid):
+            return '项目有待处理的文件操作'
+        if e.store.db.execute("""SELECT 1 FROM record_summaries
+                WHERE kind IN ('tasks','replicas') AND json_extract(data,'$.project_id')=? LIMIT 1""",
+                (pid,)).fetchone():
+            return '项目已有实验或服务器副本'
+        if e.store.db.execute("""SELECT 1 FROM records WHERE kind='result_tables'
+                AND (id=? OR id GLOB ?) LIMIT 1""", (pid, pid + ':*')).fetchone():
+            return '项目已有结果表'
+        for child in e.local_project(pid).iterdir():
+            if Content.linked_directory(child) or not child.is_dir() or any(child.iterdir()):
+                return '项目目录已有文件或历史记录'
+        return ''
+
     def folder(self,pid):
         path=confined(self.engine.local_project(pid),'source-sync');path.mkdir(exist_ok=True);return path
 
@@ -49,18 +102,21 @@ class CodeSources:
                     for group in ('versions','history','changes'):confined(self.folder(pid),group+'/'+target+'.json').unlink(missing_ok=True)
             pending.unlink()
 
-    def source(self,raw):
+    def source(self,raw,*,allow_new=False):
         value=Path(str(raw).strip()).expanduser()
-        if not value.is_absolute() or str(value).startswith('\\\\') or not value.is_dir():raise ValueError('请填写控制器本机已存在的源码文件夹绝对路径')
+        if not value.is_absolute() or str(value).startswith('\\\\'):
+            raise ValueError('请填写控制器本机源码文件夹的绝对路径')
+        if not value.is_dir() and (not allow_new or value.exists()):
+            raise ValueError('请填写控制器本机已存在的源码文件夹绝对路径')
         # Reject linked ancestors, drive roots, and storage recursion.
         for p in (value,*value.parents):
-            if p.exists() and Content.linked_directory(p):raise ValueError('源码路径不支持符号链接或目录联接')
+            if Content.linked_directory(p):raise ValueError('源码路径不支持符号链接或目录联接')
         value=value.resolve();root=self.engine.root.resolve()
         if value==Path(value.anchor) or value==root or root in value.parents or value in root.parents:
             raise ValueError('源码目录不能是磁盘根目录、工具保存目录，或其父／子目录')
         return value
 
-    def configure(self,pid,data):
+    def configure(self,pid,data,*,await_files=False):
         e=self.engine
         lock=self.lock(pid)
         if not lock.acquire(blocking=False):raise ValueError('源码正在同步，请等待完成或中断后再保存配置')
@@ -81,6 +137,10 @@ class CodeSources:
                    'exclude':exclude,'configuration_id':uid(),'status':'waiting' if raw else 'managed','error':'','configured_at':time.time()}
             if same and old.get('manifest'):value['status']='ready' if enabled else 'paused'
             elif not raw:value.pop('manifest',None);value.pop('revision',None)
+            if await_files:
+                value['awaiting_first_files']=True
+            elif not same:
+                value.pop('awaiting_first_files',None)
             # Keep the previous mirror version across a source change for rollback.
             if not same:value.pop('root_identity',None)
             e.store.put('code_sources',value);self.last[pid]=0
@@ -138,7 +198,12 @@ class CodeSources:
                 expected_mirror=mirror_state.get('stamps',{}) if mirror_state.get('revision')==value.get('revision') else prior.get('mirror_stamps',{})
                 if prior and scan(code,[],check)!=expected_mirror:
                     raise ValueError('工具 code 副本被手动修改；请把修改合并回源码目录，或解绑后使用该副本，未覆盖冲突')
-                observed=self._worker(source,value['exclude'],check,scan_only=True)
+                waiting=value.get('awaiting_first_files',False)
+                observed=self._worker(source,value['exclude'],check,scan_only=True,allow_empty=waiting)
+                if waiting and not observed['stamps']:
+                    value.update(status='waiting',checked_at=time.time())
+                    e.store.put('code_sources',value)
+                    return {'status':'waiting','changed':False}
                 if value.get('root_identity') and observed['root_identity']!=value['root_identity']:
                     raise ValueError('源码根目录身份变化，可能挂载或文件夹被替换，请重新保存路径配置后同步')
                 if prior.get('source_stamps')==observed['stamps'] and value.get('synced_configuration')==value['configuration_id'] and all(pool.contains(v['sha256'],v['size'],check) for v in prior.get('files',{}).values()):
@@ -192,6 +257,7 @@ class CodeSources:
                         value.update(status='ready' if value['enabled'] else 'paused',revision=revision,manifest='versions/'+revision+'.json',
                                      root_identity=captured['root_identity'],synced_configuration=value['configuration_id'],checked_at=time.time(),
                                      synced_at=time.time(),files=len(files),added=len(added),modified=len(modified),deleted=len(deleted),error='')
+                        value.pop('awaiting_first_files',None)
                         project=e.store.get('projects',pid);project.update(public_files_revision=revision,public_files_updated_at=time.time())
                         e.store.put_many([('projects',project),('code_sources',value)]);committed=True;pending.unlink()
                     except Exception:

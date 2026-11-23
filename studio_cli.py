@@ -160,8 +160,14 @@ def commit(client, batch_id, revision, wait):
     return wait_for(client, result['id'], wait, batch_id=batch_id)
 
 
+def resolve_project(client, selector):
+    if re.fullmatch('[a-f0-9]{32}', selector):
+        return selector
+    return project_id(client.json('/api/state')['projects'], selector)
+
+
 def result_command(client,args):
-    pid=args.project if re.fullmatch('[a-f0-9]{32}',args.project) else project_id(client.json('/api/state')['projects'],args.project)
+    pid = resolve_project(client, args.project)
     base='/api/projects/'+part(pid)
     def get(suffix,**params):
         return client.json(base+suffix+'?'+urlencode(params,doseq=True))
@@ -194,6 +200,15 @@ def result_command(client,args):
 
 def run(client, args):
     cmd = args.command
+    if cmd in ('source-status', 'source-init', 'source-sync'):
+        path = '/api/projects/' + part(resolve_project(client, args.project)) + '/source'
+        if cmd == 'source-status':
+            return client.json(path)
+        if cmd == 'source-init':
+            # An older controller would silently ignore a path on /initialize.
+            return client.json(path + '/initialize-at', {'path': str(args.path.expanduser().absolute())})
+        job = client.json(path + '/sync', {})
+        return wait_for(client, job['id'], args.wait)
     if cmd.startswith('result-'):
         return result_command(client,args)
     if cmd == 'job':
@@ -238,6 +253,15 @@ def parser():
     cli.add_argument('--port', type=int, help='控制器本机端口（正式工作空间默认 8776）')
     cli.add_argument('--data-dir', type=Path, help='控制器本次使用的保存目录')
     commands = cli.add_subparsers(dest='command', required=True)
+    for name, help_text in [('source-status', '查询当前源码目录绑定'),
+                            ('source-init', '仅为空白且尚未绑定的项目绑定指定工作目录中的源码'),
+                            ('source-sync', '立即同步当前绑定的源码目录')]:
+        action = commands.add_parser(name, help=help_text)
+        action.add_argument('--project', required=True, help='完整项目 ID 或唯一名称')
+        if name == 'source-init':
+            action.add_argument('--path', type=Path, required=True, help='指定源码目录，可相对于调用 CLI 的当前目录；缺失时创建')
+        if name == 'source-sync':
+            action.add_argument('--wait', type=int, default=300, help='等待同步的秒数')
     runs=commands.add_parser('result-runs',help='列出项目可整理的成功运行（含历史）')
     files=commands.add_parser('result-files',help='列出指定运行的本机回传文件')
     evidence=commands.add_parser('result-evidence',help='分段读取本机回传的指标文件或日志')

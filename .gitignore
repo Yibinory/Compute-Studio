@@ -1,6 +1,8 @@
 .venv/
 data/
 data-demo/
+data-sources/
+data-demo-sources/
 logs/
 __pycache__/
 .pytest_cache/
