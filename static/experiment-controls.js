@@ -16,7 +16,11 @@ function refreshExperimentControls(){
   if(dialogKind!=='task-detail'||!$('#dialog').open)return;
   const task=state.tasks.find(t=>t.id===selectedTask),group=$('[data-experiment-controls]');if(!task||!group)return;
   const signature=JSON.stringify([task.status,task.reason,task.exit_code,task.synced_at,task.archived]);if(group.dataset.signature===signature)return;group.dataset.signature=signature;
-  group.querySelectorAll('[data-action=task-cancel],[data-action=task-pause],[data-action=task-resume],[data-action=task-queue]').forEach(el=>el.remove());group.insertAdjacentHTML('afterbegin',experimentButtons(task,true));
+  const markup=experimentButtons(task,true);
+  if(group.dataset.controlsMarkup!==markup){
+    group.querySelectorAll('[data-action=task-cancel],[data-action=task-pause],[data-action=task-resume],[data-action=task-queue]').forEach(el=>el.remove());
+    group.insertAdjacentHTML('afterbegin',markup);group.dataset.controlsMarkup=markup;
+  }
   const status=$('#experiment-live-status');if(status)status.innerHTML=`${badge(task.status)}<span>${esc(task.reason||'')}${task.exit_code!=null?' · 退出码 '+task.exit_code:''}</span>`;
 }
 taskDetail=async function(id){

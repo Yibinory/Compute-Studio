@@ -38,7 +38,7 @@ async function resultLoad(id,force=false){
    }
   }}catch{}}
   if(force){e.version=0;resultLocal(e);}
-  if(resultActive(id,e.dataset,e.table)){render();styleControls();}
+  afterControlInteraction($('#main'),()=>{if(resultActive(id,e.dataset,e.table)){render();styleControls();}});
   if(e.dirty&&!e.conflict&&!e.error)resultSchedule(e);
  }catch(error){e.error=error.message;if(resultActive(id,e.dataset,e.table)){$('.project-results')?.replaceChildren();const target=$('.project-results');if(target)target.innerHTML=`<p class="error-text">${esc(error.message)}</p>${button('results-reload','重新载入',`data-project="${id}"`,'small')}`;}}
  finally{e.loading=false;}
@@ -225,7 +225,14 @@ submitForm=async function(form){
 document.addEventListener('input',event=>{
  const el=event.target;
  if(el.matches('[data-result-field],[data-result-metric]')){const e=resultEntry(route()[1]),row=e.doc?.rows.find(r=>r.id===el.closest('[data-result-row]')?.dataset.resultRow);if(!row)return;if(el.dataset.resultMetric)row.values[el.dataset.resultMetric]=el.value;else row[el.dataset.resultField]=el.value;resultTouch(e);}
- if(el.matches('[data-result-search]')){const e=resultEntry(route()[1]);e.query=el.value;e.page=0;clearTimeout(e.searchTimer);const pos=el.selectionStart;e.searchTimer=setTimeout(()=>{if(!el.isConnected)return;render();const input=$('[data-result-search]');input?.focus();input?.setSelectionRange(pos,pos);},160);}
+ if(el.matches('[data-result-search]')){
+   const e=resultEntry(route()[1]);e.query=el.value;e.page=0;clearTimeout(e.searchTimer);
+   e.searchTimer=setTimeout(()=>afterControlInteraction($('#main'),()=>{
+     if(!el.isConnected)return;
+     const focused=document.activeElement===el,pos=el.selectionStart;render();
+     if(focused){const input=$('[data-result-search]');input?.focus();input?.setSelectionRange(pos,pos);}
+   }),160);
+ }
  if(el.matches('[data-result-task-search]')){const form=el.form,select=form.elements.task_id,current=select.value;select.innerHTML=resultTaskOptions(form.dataset.project,current,el.value);}
 });
 window.addEventListener('pagehide',()=>{for(const e of resultBooks.values())if(e.dirty)resultLocal(e);});

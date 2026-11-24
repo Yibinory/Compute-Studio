@@ -5,7 +5,7 @@ const transferStates={queued:'等待处理',uploading:'正在上传',verifying:'
 const filePresence={unchecked:'待核验',matching:'有 · hash 一致',missing:'无',mismatch:'有 · hash 不一致'};
 const fileActions={pending:'尚未判定',verify:'仅核验（不传输）',skip:'跳过上传',upload:'上传新文件',replace:'重传并覆盖'};
 colors.verification_pending='amber';labels.verification_pending='待核验';
-let transferHistory={offset:0,status:'all',lastFetch:0,loading:false,data:null},transferReader=null,logReader=null,tailRequest=null;
+let transferHistory={offset:0,status:'all',lastFetch:0,loading:false,data:null,revision:0},transferReader=null,logReader=null,tailRequest=null;
 
 async function detailGet(path,signal){const response=await fetch(path,{signal}),data=await response.json();if(!response.ok)throw Error(data.error||'读取失败');return data;}
 function detailsTitle(html,kind,id){return html.replace('<h3>',`<h3><button class="transfer-title-button" data-action="transfer-detail" data-kind="${kind}" data-id="${esc(id)}">`).replace('</h3>','</button></h3>').replace('<div class="actions">',`<div class="actions">${button('transfer-detail','详细记录',`data-kind="${kind}" data-id="${esc(id)}"`,'small')}`);}
@@ -17,10 +17,22 @@ uploadsPage=function(){
   return pageHead('上传与进度','每次上传与同步都保留详细记录，最新的传输排在最上面。','<a href="#events">完整操作记录 →</a>')+`<div class="upload-summary"><span><b>${counts.active}</b> 正在进行</span><span><b>${counts.success}</b> 已完成</span><span><b>${counts.stopped}</b> 已中断 / 失败</span></div><div class="transfer-list-toolbar"><div class="tabs">${[['all','全部记录'],['active','进行中'],['success','已完成'],['stopped','中断与失败']].map(([v,label])=>button('transfer-filter',label,`data-value="${v}"`,h.status===v?'active':'')).join('')}</div><small>点击名称或「详细记录」查看每个文件 · 按最新发起时间排序</small></div>${h.error?`<div class="notice warning">${esc(h.error)}</div>`:''}${entries.length?`<div class="grid">${entries.map(e=>e.kind==='upload'?transferCard(e.value):uploadJobCard(e.value)).join('')}</div>`:empty(h.loading?'正在读取记录…':'暂无符合条件的上传','从项目上传代码或从数据集页面导入、同步数据。')}<div class="detail-pagination"><span>${data?.total_count?data.offset+1:0}–${data?Math.min(data.offset+data.entries.length,data.total_count):entries.length} / ${data?.total_count??entries.length}</span><div class="actions">${button('transfer-history-prev','上一页',`${!h.offset||h.loading?'disabled':''}`,'small')}${button('transfer-history-next','下一页',`${!data||data.offset+data.limit>=data.total_count||h.loading?'disabled':''}`,'small')}</div></div>`;
 };
 async function fetchTransferHistory(force=false){
-  const h=transferHistory;if(h.loading||!force&&Date.now()-h.lastFetch<2500)return;h.loading=true;
-  try{h.data=await detailGet(`/api/transfers?offset=${h.offset}&status=${h.status}`);h.error='';}catch(e){h.error=e.message;}
-  finally{h.loading=false;h.lastFetch=Date.now();if(route()[0]==='uploads')render();}
+  const h=transferHistory;if(!force&&(h.loading||Date.now()-h.lastFetch<2500))return;
+  const revision=++h.revision;h.loading=true;
+  try{
+    const data=await detailGet(`/api/transfers?offset=${h.offset}&status=${h.status}`);
+    if(revision===h.revision){h.data=data;h.error='';}
+  }catch(e){if(revision===h.revision)h.error=e.message;}
+  finally{
+    if(revision===h.revision){
+      h.loading=false;h.lastFetch=Date.now();
+      afterControlInteraction($('#main'),paintTransferHistory);
+    }
+  }
 }
+function paintTransferHistory(){if(route()[0]==='uploads')render();}
+function paintCurrentTransfer(){if(transferReader)updateTransferReader(transferReader);}
+function paintCurrentLog(){if(logReader)updateLogReader(logReader);}
 function transferView(kind,id){
   if(transferReader?.kind!==kind||transferReader?.id!==id){transferReader?.controller?.abort();transferReader={kind,id,offset:0,receiptOffset:0,query:'',server:'',status:'',job:'',tab:'files',seq:0,lastFetch:0};}
   return transferReader;
@@ -47,7 +59,7 @@ async function fetchTransferReader(view,force=false){
   const params=new URLSearchParams({offset:view.offset,receipt_offset:view.receiptOffset,limit:100,query:view.query,server:view.server,status:view.status,job_id:view.job});
   try{const data=await detailGet(`/api/${view.kind==='upload'?'uploads/'+view.id+'/details':'jobs/'+view.id+'/transfer-details'}?${params}`,view.controller.signal);if(seq===view.seq){view.data=data;view.error='';}}
   catch(e){if(seq===view.seq&&e.name!=='AbortError')view.error=e.message;}
-  finally{if(seq===view.seq){view.loading=false;view.lastFetch=Date.now();updateTransferReader(view);}}
+  finally{if(seq===view.seq){view.loading=false;view.lastFetch=Date.now();afterControlInteraction($('#main'),paintCurrentTransfer);}}
 }
 function transferFileBody(f){return `<p class="detail-full-path">${esc(f.path)}</p><p>${esc(f.server_name)}${f.shared?' · 共享，由 '+esc(f.source_server_name)+' 执行':''}</p><div class="info-grid"><div><small>同步前状态</small>${filePresence[f.initial_state]}</div><div><small>实际操作</small>${fileActions[f.action]}</div><div><small>单文件进度</small>${transferStates[f.status]} · ${filePercent(f).toFixed(1)}%<br>${size(f.bytes)} / ${size(f.total)}</div><div><small>最终核验</small>${f.verified_at?filePresence[f.current_state]+' · '+fmt(f.verified_at):'等待最终核验'}</div></div>${f.verification_method==='shared_sha256'?`<p class="muted">共享目录与文件视图已确认；最终 SHA-256 来自 ${esc(f.source_server_name)} 的内容核验。</p>`:''}${f.verification_error?`<p class="error-text">${esc(f.verification_error)}</p>`:''}<div class="hash-record"><span>预期 SHA-256</span><code>${esc(f.expected_sha256)}</code><span>同步前 SHA-256</span><code>${esc(f.previous_sha256||'不存在 / 未核验')}</code><span>最终 SHA-256</span><code>${esc(f.current_sha256||'尚未核验')}</code></div>${f.error?`<p class="error-text">${esc(f.error)}</p>`:''}<div class="section-title"><h3>文件操作时间线</h3></div>${(f.events||[]).map(e=>`<div class="file-audit-event"><time>${fmt(e.time)}</time><span>${e.status==='planned'?'判定操作 · '+fileActions[e.message]:transferStates[e.status]||e.status}</span></div>`).join('')}`;}
 
@@ -77,7 +89,7 @@ async function fetchLogReader(view,force=false){
   view.controller?.abort();const controller=new AbortController();view.controller=controller;const seq=++view.seq;view.loading=true;const timer=setTimeout(()=>controller.abort(),12000);
   try{const data=await detailGet(`/api/tasks/${view.id}/log?mode=${view.mode}&offset=${view.offset}${view.attempt?'&attempt_id='+encodeURIComponent(view.attempt):''}`,controller.signal);if(seq===view.seq){view.pending=!!data.pending;view.error='';if(!data.pending){view.data=data;if(view.mode==='full'&&data.offset!==undefined){if(data.offset!==view.offset)view.previous=[];view.offset=data.offset;}}}}
   catch(e){if(seq===view.seq)view.error=e.name==='AbortError'?'读取超时，请重试；最近 200 行模式会自动再次读取。':e.message;}
-  finally{clearTimeout(timer);if(seq===view.seq){view.loading=false;view.lastFetch=Date.now();updateLogReader(view);}}
+  finally{clearTimeout(timer);if(seq===view.seq){view.loading=false;view.lastFetch=Date.now();afterControlInteraction($('#main'),paintCurrentLog);}}
 }
 render=function(){
   const [page,kind,id]=route();
@@ -95,7 +107,7 @@ handleAction=async function(el){
   const a=el.dataset.action,v=transferReader,l=logReader;
   if(a==='dataset-verify'){await api(`/api/datasets/${el.dataset.id}/verify`,{});toast('仅核验已开始，可在操作记录查看进度或中断');await load();return;}
   if(a==='transfer-detail'){if($('#dialog').open)$('#dialog').close();location.hash=`transfer/${el.dataset.kind}/${el.dataset.id}`;return;}
-  if(a==='transfer-filter'||a==='transfer-history-prev'||a==='transfer-history-next'){if(transferHistory.loading)return;if(a==='transfer-filter'){transferHistory.status=el.dataset.value;transferHistory.offset=0;}else transferHistory.offset=Math.max(0,transferHistory.offset+(a.endsWith('next')?30:-30));transferHistory.data=null;await fetchTransferHistory(true);return;}
+  if(a==='transfer-filter'||a==='transfer-history-prev'||a==='transfer-history-next'){if(a==='transfer-filter'){transferHistory.status=el.dataset.value;transferHistory.offset=0;}else transferHistory.offset=Math.max(0,transferHistory.offset+(a.endsWith('next')?30:-30));transferHistory.data=null;await fetchTransferHistory(true);return;}
   if(a==='transfer-detail-tab'){v.tab=el.dataset.tab;document.querySelectorAll('.detail-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.tab===v.tab));updateTransferReader(v);return;}
   if(a==='transfer-detail-prev'||a==='transfer-detail-next'){const field=v.tab==='receipts'?'receiptOffset':'offset';v[field]=Math.max(0,v[field]+(a.endsWith('next')?100:-100));await fetchTransferReader(v,true);return;}
   if(a==='transfer-file-detail'){const f=v.data.files.find(f=>f.server_id===el.dataset.server&&f.path===el.dataset.path);if(f){v.selectedFile={server:f.server_id,path:f.path};modal('文件核验与操作记录',transferFileBody(f),'transfer-file');}return;}

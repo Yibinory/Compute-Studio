@@ -128,11 +128,16 @@ document.addEventListener('input',event=>{
  const el=event.target;if(!el.matches('[data-figure-filter]'))return;
  const config=resultEntry(route()[1]).chart;config.filter=el.value;config.page=0;
  const cursor=el.selectionStart;clearTimeout(config.timer);
- config.timer=setTimeout(()=>{if(!el.isConnected)return;refreshResultFigures(el);const next=document.querySelector('[data-figure-filter]');next?.focus();next?.setSelectionRange(cursor,cursor);},140);
+ config.timer=setTimeout(()=>afterControlInteraction($('#main'),()=>{
+   if(!el.isConnected)return;
+   const focused=document.activeElement===el;
+   refreshResultFigures(el);
+   if(focused){const next=document.querySelector('[data-figure-filter]');next?.focus();next?.setSelectionRange(cursor,cursor);}
+ }),140);
 });
 function resultFigureHint(event){
  const mark=event.target.closest?.('[data-figure-hint]');
- if(mark)mark.closest('figure').querySelector('figcaption').textContent=mark.dataset.figureHint;
+ if(mark){const caption=mark.closest('figure').querySelector('figcaption');if(caption.textContent!==mark.dataset.figureHint)caption.textContent=mark.dataset.figureHint;}
 }
 document.addEventListener('pointerover',resultFigureHint);
 document.addEventListener('focusin',resultFigureHint);

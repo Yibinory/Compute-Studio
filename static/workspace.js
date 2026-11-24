@@ -2,7 +2,6 @@
 let graphMode=true, cleanupPreview=null;
 const baseGPU=gpuCard,baseProject=projectPage,baseReplicas=replicasPage,baseServers=serversPage,baseRender=render,baseAction=handleAction,baseDetail=taskDetail,baseSubmit=submitForm;
 const num=v=>Number.isFinite(v)?v.toFixed(1):'—';
-const notesFor=id=>(state.notes||[]).filter(n=>n.task_id===id);
 const meter=(value,detail)=>`<div class="resource-value"><strong>${value}</strong><small>${detail}</small></div>`;
 function resourceCard(server){
   const s=server.snapshot||{},m=s.memory||{},w=s.work_disk||{},d=s.data_disk||{};
@@ -71,6 +70,26 @@ function graphElapsed(task){
   const seconds=Math.max(0,Math.floor((task.finished_at||Date.now()/1000)-task.started_at));
   return seconds<60?seconds+' 秒':seconds<3600?Math.floor(seconds/60)+' 分钟':Math.floor(seconds/3600)+' 小时 '+Math.floor(seconds%3600/60)+' 分钟';
 }
+const graphStatusNames={complete:'完成',running:'执行中',waiting:'等待',draft:'草稿',failed:'异常',canceled:'已中断'};
+function graphSummary(counts){
+  return Object.entries(graphStatusNames).filter(([status])=>counts[status]).map(([status,label])=>
+    `<span class="schedule-count ${status}"><i></i>${label} <b>${counts[status]}</b></span>`).join('');
+}
+function graphNoteCounts(){
+  const counts=new Map();
+  for(const note of state.notes||[])counts.set(note.task_id,(counts.get(note.task_id)||0)+1);
+  return counts;
+}
+function graphNodeInfo(task,noteCount){
+  const files=task.outputs||[],server=serverBy(task.server_id)?.name||'自动选择服务器';
+  const label=runtimeLabel(task);
+  const metadata=[task.name,label,server+(task.gpu_index!=null?' · GPU '+task.gpu_index:''),graphElapsed(task),
+    task.reason,task.exit_code!=null?'退出码 '+task.exit_code:'',graphLayoutMode==='time'?fmt(task.started_at||task.created_at):''];
+  return {status:graphState(task),label,metadata:metadata.filter(Boolean).join('\n'),server,location:task.server_id?server:'自动调度',
+    output:'输出 '+(task.output_count||files.length),outputTitle:files.map(v=>v.path).join('\n')||'运行后显示输出文件',
+    notes:noteCount?'Notes '+noteCount:'Notes'};
+}
+function graphEdgeKind(status){return status==='complete'?'done':status==='failed'?'error':'wait';}
 // Rounded orthogonal connectors keep the flow readable in either direction.
 function graphConnector(points){
   let d=`M ${points[0][0]} ${points[0][1]}`;
@@ -99,23 +118,21 @@ function scheduleGraph(tasks){
   const scale=view.fit?Math.min(1,(available-26)/graph.width):view.scale;
   const paths=edges.map(edge=>{
     const p=map.get(edge.source),n=map.get(edge.target),points=edge.points;
-    const kind=graphState(p)==='complete'?'done':graphState(p)==='failed'?'error':'wait';
+    const kind=graphEdgeKind(graphState(p));
     return `<path class="graph-edge ${kind} ${edge.secondary?'secondary':''}" data-source="${esc(p.id)}" data-target="${esc(n.id)}" d="${graphConnector(points)}" marker-end="url(#schedule-arrow-${kind})"><title>${esc(p.name)} → ${esc(n.name)}${edge.secondary?'（另有间接依赖路径）':''}</title></path>`;
   }).join('');
   const markers=['done','wait','error'].map((kind,i)=>`<marker id="schedule-arrow-${kind}" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M 0 0 L 5 2.5 L 0 5" fill="${['#369c81','#93a2b6','#cf7180'][i]}"/></marker>`).join('');
-  const statusNames={complete:'完成',running:'执行中',waiting:'等待',draft:'草稿',failed:'异常',canceled:'已中断'};
-  const summary=Object.entries(counts).filter(([,count])=>count).map(([status,count])=>`<span class="schedule-count ${status}"><i></i>${statusNames[status]} <b>${count}</b></span>`).join('');
+  const summary=graphSummary(counts),noteCounts=graphNoteCounts();
   const ports=(id,side)=>edges.filter(e=>e[side==='in'?'target':'source']===id).map(e=>`<span class="flow-port ${side} ${e.secondary?'secondary':''}" data-source="${esc(e.source)}" data-target="${esc(e.target)}" style="${horizontal?'top':'left'}:${e[side==='in'?'targetOffset':'sourceOffset']-2}px"></span>`).join('');
   const cards=graph.nodes.map(t=>{
-    const notes=notesFor(t.id),status=graphState(t),files=t.outputs||[],server=serverBy(t.server_id)?.name||'自动选择服务器',elapsed=graphElapsed(t),outputCount=t.output_count||files.length,project=projectBy(t.project_id||route()[1]);
+    const info=graphNodeInfo(t,noteCounts.get(t.id)),project=projectBy(projectId);
     const prefix=project?.name+'_',displayName=(prefix&&t.name.startsWith(prefix)?t.name.slice(prefix.length):t.name).replace(/_/g,' ');
-    const metadata=[t.name,labels[t.status]||t.status,server+(t.gpu_index!=null?' · GPU '+t.gpu_index:''),elapsed,t.reason,t.exit_code!=null?'退出码 '+t.exit_code:'',graphLayoutMode==='time'?fmt(t.started_at||t.created_at):''].filter(Boolean).join('\n');
-    return `<article class="graph-node schedule-node flow-node ${status}" data-node-id="${esc(t.id)}" title="${esc(metadata)}" style="left:${t.x}px;top:${t.y}px;width:${graph.nodeWidth}px;height:${graph.nodeHeight}px">${ports(t.id,'in')}<div class="flow-node-top"><span class="flow-sequence">#${esc(t.seq)}</span><span class="flow-status-text"><i class="flow-status-dot"></i>${esc(labels[t.status]||t.status)}</span></div><div class="flow-node-name"><button class="node-title" data-action="task-detail" data-id="${esc(t.id)}" title="${esc(t.name)}">${esc(displayName)}</button></div><div class="flow-node-duration">${taskDurationMarkup(t)}</div><div class="node-footer"><span class="flow-location" title="${esc(server)}">${esc(t.server_id?server:'自动调度')}</span><div class="node-actions">${button('task-detail','输出 '+outputCount,`data-id="${esc(t.id)}" title="${esc(files.map(v=>v.path).join('\n')||'运行后显示输出文件')}"`,'small output-button')}${button('graph-notes',notes.length?'Notes '+notes.length:'Notes',`data-id="${esc(t.id)}"`,'small note-button')}</div></div>${ports(t.id,'out')}</article>`;
+    return `<article class="graph-node schedule-node flow-node ${info.status}" data-node-id="${esc(t.id)}" title="${esc(info.metadata)}" style="left:${t.x}px;top:${t.y}px;width:${graph.nodeWidth}px;height:${graph.nodeHeight}px">${ports(t.id,'in')}<div class="flow-node-top"><span class="flow-sequence">#${esc(t.seq)}</span><span class="flow-status-text"><i class="flow-status-dot"></i><span class="flow-status-label">${esc(info.label)}</span></span></div><div class="flow-node-name"><button class="node-title" data-action="task-detail" data-id="${esc(t.id)}" title="${esc(t.name)}">${esc(displayName)}</button></div><div class="flow-node-duration">${taskDurationMarkup(t)}</div><div class="node-footer"><span class="flow-location" title="${esc(info.server)}">${esc(info.location)}</span><div class="node-actions">${button('task-detail',esc(info.output),`data-id="${esc(t.id)}" title="${esc(info.outputTitle)}"`,'small output-button')}${button('graph-notes',info.notes,`data-id="${esc(t.id)}"`,'small note-button')}</div></div>${ports(t.id,'out')}</article>`;
   }).join('');
   const choices=[...tasks].sort((a,b)=>a.seq-b.seq).map(t=>
     `<option data-task="${esc(t.id)}" data-seq="${esc(t.seq)}" value="#${esc(t.seq)} ${esc(t.name)}"></option>`).join('');
   const overviewNodes=graph.nodes.map(n=>
-    `<rect class="map-node ${graphState(n)}" x="${n.x}" y="${n.y}" width="${graph.nodeWidth}" height="${graph.nodeHeight}"/>`).join('');
+    `<rect class="map-node ${graphState(n)}" data-map-id="${esc(n.id)}" x="${n.x}" y="${n.y}" width="${graph.nodeWidth}" height="${graph.nodeHeight}"/>`).join('');
   const zoomButton=(action,label,attrs='')=>button(action,label,attrs,'small');
   return `<section class="schedule-board flow-board compact-flow ${horizontal?'horizontal':'vertical'} ${graphShowAllEdges?'show-all-edges':''}">
     <header class="flow-board-header"><div><strong>实验流程 <small>${tasks.length}${component?'/'+totalTasks:''} 个节点 · ${edges.length} 条依赖</small></strong>
@@ -142,6 +159,47 @@ function scheduleGraph(tasks){
     </footer></section>`;
 }
 
+function refreshGraphStatus(){
+  refreshDispatchNotice();
+  const board=$('.flow-board');
+  if(!board)return;
+  const tasks=new Map(state.tasks.map(t=>[t.id,t])),notes=graphNoteCounts(),counts={},changedStates=new Map();
+  function setText(el,text){if(el.textContent!==text)el.textContent=text;}
+  function setTitle(el,title){if(el.title!==title)el.title=title;}
+  const cards=board.querySelectorAll('[data-node-id]');
+  for(const card of cards){
+    const task=tasks.get(card.dataset.nodeId);
+    if(!task)continue;
+    const info=graphNodeInfo(task,notes.get(task.id));
+    counts[info.status]=(counts[info.status]||0)+1;
+    if(!card.classList.contains(info.status)){
+      card.classList.remove(...Object.keys(graphStatusNames));card.classList.add(info.status);
+      changedStates.set(task.id,info.status);
+    }
+    setTitle(card,info.metadata);
+    setText($('.flow-status-label',card),info.label);
+    const location=$('.flow-location',card),output=$('.output-button',card);
+    setTitle(location,info.server);setText(location,info.location);
+    setTitle(output,info.outputTitle);setText(output,info.output);
+    setText($('.note-button',card),info.notes);
+  }
+  if(changedStates.size){
+    for(const rect of board.querySelectorAll('[data-map-id]')){
+      const status=changedStates.get(rect.dataset.mapId);
+      if(status)rect.setAttribute('class','map-node '+status);
+    }
+    for(const edge of board.querySelectorAll('.graph-edge')){
+      const status=changedStates.get(edge.dataset.source);
+      if(!status)continue;
+      const kind=graphEdgeKind(status);
+      edge.classList.remove('done','wait','error');edge.classList.add(kind);
+      edge.setAttribute('marker-end','url(#schedule-arrow-'+kind+')');
+    }
+  }
+  const summary=$('.flow-overview > div',board),markup=graphSummary(counts);
+  if(summary.innerHTML!==markup)summary.innerHTML=markup;
+  setText($('.flow-overview > span b',board),(counts.complete||0)+' / '+cards.length);
+}
 
 // Keep the viewport in diagram coordinates so zoom and polling preserve the reading position.
 function graphFrame(scroll){
@@ -234,6 +292,7 @@ function mountGraph(scroll){
   view.jump=false;view.reframe=false;
   rememberGraphCenter(scroll);updateGraphMap(scroll);
   enableGraphMousePan(scroll);
+  enableGraphHighlight($('.schedule-canvas',scroll));
   scroll.addEventListener('scroll',()=>{
     if(!scroll.isConnected)return;
     rememberGraphCenter(scroll);updateGraphMap(scroll);
@@ -241,9 +300,18 @@ function mountGraph(scroll){
 }
 render=function(){
   const old=$('.flow-board .graph-scroll');
+  const focused=document.activeElement,focusedNode=old?.contains(focused)&&focused.closest('[data-node-id]');
   if(old&&old.clientWidth===graphView(old.dataset.project).viewportWidth)rememberGraphCenter(old);
   scheduleGraphBaseRender();
-  const next=$('.flow-board .graph-scroll');if(next)mountGraph(next);
+  const next=$('.flow-board .graph-scroll');
+  if(next){
+    mountGraph(next);
+    if(focusedNode&&focused.matches('button')&&next.dataset.project===old.dataset.project){
+      const node=next.querySelector(`[data-node-id="${CSS.escape(focusedNode.dataset.nodeId)}"]`);
+      const control=[...node?.querySelectorAll('button')||[]].find(el=>el.className===focused.className);
+      control?.focus({preventScroll:true});
+    }
+  }
 };
 function locateGraphTask(){
   const search=$('#graph-search'),query=search.value.trim().toLocaleLowerCase();
@@ -277,24 +345,46 @@ handleAction=async function(el){
   if(el.dataset.action==='graph-notes'){await taskDetail(el.dataset.id);noteEditorSetView($('#note-form'),'split');$('#note-form textarea')?.focus();return;}
   return scheduleGraphBaseAction(el);
 };
-function graphHighlight(node){
-  const canvas=node?.closest('.schedule-canvas');if(!canvas)return;
-  const id=node.dataset.nodeId,related=new Set([id]);
-  canvas.querySelectorAll('.graph-edge,.flow-port').forEach(edge=>{const active=edge.dataset.source===id||edge.dataset.target===id;edge.classList.toggle('highlighted',active);if(active){related.add(edge.dataset.source);related.add(edge.dataset.target);}});
-  canvas.classList.add('highlighting');canvas.querySelectorAll('.graph-node').forEach(card=>card.classList.toggle('related',related.has(card.dataset.nodeId)));
+function enableGraphHighlight(canvas){
+  const nodes=new Map(),connections=new Map();
+  for(const node of canvas.querySelectorAll('[data-node-id]')){
+    nodes.set(node.dataset.nodeId,node);connections.set(node.dataset.nodeId,[]);
+  }
+  for(const edge of canvas.querySelectorAll('.graph-edge,.flow-port')){
+    connections.get(edge.dataset.source)?.push(edge);
+    connections.get(edge.dataset.target)?.push(edge);
+  }
+  let hovered=canvas.querySelector('.schedule-node:hover'),focused=null,active=null;
+  function highlight(node,on){
+    if(!node)return;
+    node.classList.toggle('related',on);
+    for(const edge of connections.get(node.dataset.nodeId)){
+      edge.classList.toggle('highlighted',on);
+      nodes.get(edge.dataset.source)?.classList.toggle('related',on);
+      nodes.get(edge.dataset.target)?.classList.toggle('related',on);
+    }
+  }
+  function update(node){
+    if(node===active)return;
+    highlight(active,false);highlight(node,true);active=node;
+    canvas.classList.toggle('highlighting',!!node);
+  }
+  function inside(target){return target instanceof Element && canvas.contains(target)?target.closest('.schedule-node'):null;}
+  canvas.addEventListener('pointerover',e=>{hovered=inside(e.target);update(hovered||focused);});
+  canvas.addEventListener('pointerout',e=>{hovered=inside(e.relatedTarget);update(hovered||focused);});
+  canvas.addEventListener('focusin',e=>{focused=inside(e.target);update(focused||hovered);});
+  canvas.addEventListener('focusout',e=>{focused=inside(e.relatedTarget);update(hovered||focused);});
+  update(hovered);
 }
-document.addEventListener('pointerover',e=>{const node=e.target.closest('.schedule-node');if(node&&!node.contains(e.relatedTarget))graphHighlight(node);});
-document.addEventListener('pointerout',e=>{const node=e.target.closest('.schedule-node');if(!node||node.contains(e.relatedTarget))return;const canvas=node.closest('.schedule-canvas');canvas?.classList.remove('highlighting');});
-document.addEventListener('focusin',e=>{const node=e.target.closest('.schedule-node');if(node)graphHighlight(node);});
-document.addEventListener('focusout',e=>{const node=e.target.closest('.schedule-node');if(node&&!node.contains(e.relatedTarget))node.closest('.schedule-canvas')?.classList.remove('highlighting');});
 let scheduleResizeTimer;
 window.addEventListener('resize',()=>{
   clearTimeout(scheduleResizeTimer);
   scheduleResizeTimer=setTimeout(()=>{
     const scroll=$('.flow-board .graph-scroll');if(!scroll)return;
     const view=graphView(scroll.dataset.project);
-    if(view.selected&&scroll.clientWidth!==view.viewportWidth)view.jump=true;
-    render();
+    if(scroll.clientWidth===view.viewportWidth){updateGraphMap(scroll);return;}
+    if(view.selected)view.jump=true;
+    afterControlInteraction($('#main'),()=>{if(scroll.isConnected)render();});
   },150);
 });
 

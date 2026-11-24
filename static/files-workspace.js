@@ -53,7 +53,11 @@ function projectFilesPage(project,tasks){
   return `<div class="notice">公共代码和各实验的专属输入文件直接列在下方。文件列表显示名称、大小和修改时间；实验生成的输出仍在实验详情中查看。${state.uploads?.some(u=>u.kind==='project'&&u.project_id===project.id&&!['success','canceled'].includes(u.status))?' <a href="#uploads">文件导入记录与进度 →</a>':''}</div>${fileCard(project,null)}${tasks.length?'<div class="section-title"><h2>任务输入文件</h2><span>'+tasks.length+' 个实验</span></div>'+tasks.map(t=>fileCard(project,t)).join(''):''}`;
 }
 function fileRevision(view){return JSON.stringify([state.local_storage?.root,state.projects?.find(p=>p.id===view.project)?.public_files_revision,state.uploads?.filter(u=>u.kind==='project'&&u.project_id===view.project&&(!u.task_id||u.task_id===view.task)).map(u=>[u.id,u.local_ready||u.status==='success',u.finished_at])]);}
-function updateFileRows(view){if(route()[0]!=='project'||route()[1]!==view.project||projectTab!=='files')return;const target=$(`[data-file-results="${view.key}"]`);if(target)target.innerHTML=fileRows(view);}
+function updateFileRows(view){
+  if(route()[0]!=='project'||route()[1]!==view.project||projectTab!=='files')return;
+  const target=$(`[data-file-results="${view.key}"]`);
+  if(target)afterControlInteraction(target,()=>{if(target.isConnected)target.innerHTML=fileRows(view);});
+}
 function requestFileView(view,force=false){
   if(view.loading&&!force)return;
   if(!force&&view.fetchedAt&&Date.now()-view.fetchedAt<30000&&view.revision===fileRevision(view))return;

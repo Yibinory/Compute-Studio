@@ -35,5 +35,3 @@ settingsPage=function(){return recoverySettingsWithFields()+`<section class="car
 const recoveryBaseHandleAction=handleAction;
 handleAction=async function(el){if(el.dataset.action==='cleanup-failed-workspaces'){await api('/api/tasks/failed-workspaces/cleanup',{});toast('失败副本清理已加入后台操作');await load();return;}return recoveryBaseHandleAction(el);};
 setInterval(refreshRuntimePanel,1000);
-const runtimeBaseGraph=scheduleGraph;
-scheduleGraph=function(tasks){const map=new Map(tasks.map(t=>[t.id,t]));return runtimeBaseGraph(tasks).replace(/<article[\s\S]*?<\/article>/g,card=>{const id=card.match(/data-node-id="([^"]+)"/)?.[1],task=map.get(id);return task?.status==='staging'?card.replace(`${esc(labels[task.status])}</span></div><div class="flow-node-name">`,`${esc(runtimeLabel(task))}</span></div><div class="flow-node-name">`):card;});};

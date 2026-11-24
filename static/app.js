@@ -13,17 +13,33 @@ let state={}, projectTab='tasks', scopeTask='', dialogKind='', selectedTask='', 
 let lastPollSignature=null, activeStateRead=null, lastStateReadAt=0;
 function pollPageSignature(value){
   const [page,id]=route();
-  if(['overview','servers','benchmarks','settings'].includes(page))return null;
+  if(['overview','servers','benchmarks','settings'].includes(page)){
+    const queued=value.settings.paused?value.tasks.filter(isAwaitingDispatch).length:0;
+    const common=[page,value.runtime_features,value.settings,queued];
+    if(page==='settings'){
+      const {free_bytes,total_bytes,...storage}=value.local_storage||{};
+      return JSON.stringify([...common,storage,size(free_bytes),size(total_bytes)]);
+    }
+    if(page==='servers')return JSON.stringify([...common,value.servers,value.storage]);
+    return JSON.stringify([...common,value.servers,value.projects,value.tasks,
+      value.jobs.filter(j=>j.operation?.startsWith('benchmark:'))]);
+  }
   if(page==='projects'){
     return JSON.stringify([page,value.projects,value.runtime_features,value.settings.paused,
       value.tasks.map(t=>[t.project_id,t.status,t.archived]),value.replicas.map(r=>[r.project_id,r.exists])]);
   }
   if(page==='tasks'||(page==='project'&&projectTab==='tasks')){
     const tasks=page==='tasks'?value.tasks:value.tasks.filter(t=>t.project_id===id);
-    const graphClock=page==='project'&&graphMode&&tasks.some(t=>['running','suspended'].includes(t.status))
-      ? Math.floor(Date.now()/30000) : 0;
+    if(page==='project'&&graphMode){
+      // These fields affect the surrounding controls, node identity, or layout.
+      // Status, files, notes and elapsed time update on the existing canvas.
+      const project=value.projects.find(p=>p.id===id);
+      return JSON.stringify([page,id,'graph',project?.name,project?.description,project?.archived,value.runtime_features,
+        value.settings.demo,
+        tasks.map(t=>[t.id,t.seq,t.name,t.archived,t.depends_on,t.created_at,t.started_at,t.finished_at])]);
+    }
     return JSON.stringify([page,id,value.runtime_features,value.projects,tasks,value.servers.map(s=>[s.id,s.name]),
-      page==='project'?value.notes:null,graphClock,value.settings.paused,value.settings.paused?value.tasks.filter(isAwaitingDispatch).length:0]);
+      page==='project'?value.notes:null,value.settings.paused,value.settings.paused?value.tasks.filter(isAwaitingDispatch).length:0]);
   }
   const servers=(value.servers||[]).map(({snapshot,history,...server})=>server);
   const {free_bytes,total_bytes,...storage}=value.local_storage||{};
@@ -222,6 +238,51 @@ function editingMain() {
   return (document.activeElement.matches('input,select,textarea') && $('#main').contains(document.activeElement))
     || !!$('.graph-scroll[data-mouse-pan]');
 }
+// Replacing the pressed element before the browser dispatches click loses the activation.
+const heldControls = new Map(), deferredPaints = new Map();
+function afterControlInteraction(root, paint) {
+  if (root && [...heldControls.values()].some(target => root.contains(target))) {
+    deferredPaints.set(paint, root);
+    return;
+  }
+  deferredPaints.delete(paint);
+  paint();
+}
+function releaseControl(key) {
+  const target = heldControls.get(key);
+  if (!target) return;
+  heldControls.delete(key);
+  if (deferredPaints.size) setTimeout(() => {
+    for (const [paint, root] of [...deferredPaints]) {
+      if (root.isConnected) afterControlInteraction(root, paint);
+      else deferredPaints.delete(paint);
+    }
+  }, 0);
+}
+window.addEventListener('pointerdown', e => {
+  if (e.button === 0) heldControls.set(e.pointerId, e.target);
+}, true);
+window.addEventListener('pointermove', e => {
+  if (heldControls.has(e.pointerId) && !e.buttons) releaseControl(e.pointerId);
+}, true);
+for (const type of ['pointerup','pointercancel'])
+  window.addEventListener(type, e => releaseControl(e.pointerId), true);
+window.addEventListener('keydown', e => {
+  if (e.key === ' ' || e.key === 'Enter') heldControls.set(e.key, e.target);
+}, true);
+window.addEventListener('keyup', e => releaseControl(e.key), true);
+window.addEventListener('blur', () => { for (const key of heldControls.keys()) releaseControl(key); });
+
+function paintWorkspacePoll() {
+  const signature = pollPageSignature(state);
+  if (!editingMain() && signature !== lastPollSignature) {
+    render();
+    lastPollSignature = signature;
+    return;
+  }
+  if (route()[0] === 'project' && projectTab === 'tasks' && graphMode) refreshGraphStatus();
+  if (state.uploads.some(u => u.status === 'receiving') || $('#transfer-dock')?.hidden === false) renderTransferDock();
+}
 function pollWorkspace() {
   if (document.hidden || activeStateRead) return;
   const interval = needsFastTransferPoll() ? 1000 : 5000;
@@ -250,11 +311,11 @@ async function readWorkspaceState(read) {
       jobStatuses.set(job.id, job.status);
     }
     initial = false;
-    const renderPage = read.renderPage && (!read.polling || !editingMain());
-    const signature = renderPage ? pollPageSignature(state) : null;
-    if (renderPage && (!read.polling || signature === null || signature !== lastPollSignature)) {
+    if (read.renderPage && read.polling) {
+      afterControlInteraction($('#main'), paintWorkspacePoll);
+    } else if (read.renderPage) {
       render();
-      lastPollSignature = signature;
+      lastPollSignature = pollPageSignature(state);
     } else if (state.uploads.some(u => u.status === 'receiving') || $('#transfer-dock')?.hidden === false) {
       renderTransferDock();
     }

@@ -83,7 +83,7 @@
 .flow-board .graph-edge.error { stroke: #bf8291; }
 .flow-board.show-all-edges .graph-edge.secondary { stroke: #bac6d6; opacity: .55; stroke-dasharray: 3 4; }
 .flow-board .highlighting .graph-edge.highlighted { stroke: #5278b2; stroke-width: 2; opacity: 1; }
-.flow-board .highlighting .graph-node:not(.related) { opacity: .78; }
+.schedule-board.flow-board .flow-node.related { border-color: #86a5c9; border-left-color: var(--node-accent); }
 .flow-board .flow-port { opacity: 0; }
 .flow-board .highlighting .flow-port.highlighted { opacity: 1; }
 .flow-board .schedule-foot { padding: 8px 16px; color: #62738a; }
