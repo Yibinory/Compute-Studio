@@ -5,9 +5,10 @@ import hashlib
 import json
 import shutil
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
-ROOT_FILES = ('app.py', 'studio_cli.py', 'AGENTS.md', 'requirements.txt', 'requirements-dev.txt', 'README.md',
+ROOT_FILES = ('VERSION', 'app.py', 'studio_cli.py', 'studio_launch.py', 'AGENTS.md', 'requirements.txt', 'requirements-dev.txt', 'README.md',
               '.gitignore', '.gitattributes', 'CONTRIBUTING.md', 'THIRD_PARTY_NOTICES.md',
               'start_web.bat', 'start_demo.bat')
 CODE_DIRS = {'scheduler': {'.py'}, 'templates': {'.html'}, 'tests': {'.py', '.js'},
@@ -44,7 +45,7 @@ def build(output):
         if source.is_symlink():raise ValueError('Linked source rejected: ' + str(source.relative_to(ROOT)))
         destination = output / source.relative_to(ROOT)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if source.suffix in TEXT_EXTENSIONS or source.name in {'.gitignore','.gitattributes','LICENSE'}:
+        if source.suffix in TEXT_EXTENSIONS or source.name in {'VERSION','.gitignore','.gitattributes','LICENSE'}:
             text=source.read_text(encoding='utf-8-sig').replace('\r\n','\n').replace('\r','\n')
             destination.write_bytes(text.replace('\n','\r\n').encode('utf-8') if source.suffix=='.bat' else text.encode('utf-8'))
         else:shutil.copy2(source, destination)
@@ -61,7 +62,21 @@ def build(output):
 if __name__ == '__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', default=str(ROOT/'release/compute-studio'))
+    parser.add_argument('--package', action='store_true', help='Also build a ZIP for the GitHub Releases installer')
     args=parser.parse_args();manifest=build(args.output)
     target=Path(args.output).resolve().parent/'publication-manifest.json'
     target.write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
+    if args.package:
+        from audit_public_release import audit
+        root=Path(manifest['root'])
+        report=audit(root)
+        if not report['clean']:
+            raise ValueError('发布审计失败：'+json.dumps(report['findings'],ensure_ascii=False))
+        version=(root/'VERSION').read_text(encoding='utf-8').strip()
+        package=root.parent/f'compute-studio-v{version}.zip'
+        with ZipFile(package,'x',compression=ZIP_DEFLATED) as archive:
+            for item in manifest['files']:
+                archive.write(root/item['path'],item['path'])
+        manifest['package']=str(package)
+        manifest['package_sha256']=hashlib.sha256(package.read_bytes()).hexdigest()
     print(json.dumps({k:v for k,v in manifest.items() if k!='files'},ensure_ascii=False))

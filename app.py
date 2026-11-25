@@ -34,10 +34,14 @@ from scheduler.notes import Notes
 from scheduler.uploads import Uploads, CHUNK_SIZE, BUSY
 from scheduler.local_storage import LocalStorage, saved_root, root_lock
 from scheduler.logs import read_local, CHUNK_BYTES
+from scheduler.updates import Updates, workspace_busy
+from studio_launch import INSTALL_ROOT, PROGRAM_ROOT, WORKSPACE_BUSY, WORKSPACE_LOCKED
+from studio_launch import launch_selected, mark_running, program_version, update_state
 from flask import Request
 
 
-def create_app(root=None, start=False, remote_factory=None, config_path=None, runtime=False, initial_lock=None):
+def create_app(root=None, start=False, remote_factory=None, config_path=None, runtime=False, initial_lock=None,
+               enable_updates=False):
     app=Flask(__name__)
     app.config['TEMPLATES_AUTO_RELOAD']=True
     asset_versions={}
@@ -57,21 +61,22 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
 
     app.jinja_env.globals['asset_url']=asset_url
     install=Path(__file__).parent.resolve()
-    config_path=Path(config_path or (Path(root).parent/(Path(root).name+'.location.json') if root else install/'storage-location.json'))
-    root=Path(root or os.environ.get('COMPUTE_DATA_DIR') or saved_root(config_path,install/'data')).resolve()
+    config_path=Path(config_path or (Path(root).parent/(Path(root).name+'.location.json') if root else INSTALL_ROOT/'storage-location.json'))
+    root=Path(root or os.environ.get('COMPUTE_DATA_DIR') or saved_root(config_path,INSTALL_ROOT/'data')).resolve()
     engine=Engine(root, **({'remote_factory':remote_factory} if remote_factory else {}))
     app.extensions['engine']=engine
     notes=Notes(engine.store)
     app.extensions['notes']=notes
     batch_imports=BatchImports(engine)
     app.extensions['batch_imports']=batch_imports
-    local_storage=LocalStorage(engine,config_path,install,runtime=runtime,initial_lock=initial_lock)
+    local_storage=LocalStorage(engine,config_path,INSTALL_ROOT,runtime=runtime,initial_lock=initial_lock)
     app.extensions['local_storage']=local_storage
     uploads=Uploads(engine,int(os.environ.get('COMPUTE_UPLOAD_LIMIT',200*1024**3)))
     engine.uploads=uploads
     app.extensions['uploads']=uploads
     public_files=PublicFiles(engine)
     app.extensions['public_files']=public_files
+    updates=Updates(enable_updates)
     class ManagedRequest(Request):
         def _get_file_stream(self,total_content_length,content_type,filename=None,content_length=None):
             return tempfile.TemporaryFile(dir=str(engine.root/'tmp'))
@@ -124,7 +129,23 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
     def index():
         session.setdefault('csrf',secrets.token_urlsafe(24))
         return render_template('index.html',authorized=session.get('authorized',False),csrf=session['csrf'],
-                               token_path=str(engine.root/'access-token.txt'), ai_guide_url=url_for('ai_guide'))
+                               token_path=str(engine.root/'access-token.txt'), ai_guide_url=url_for('ai_guide'),
+                               controller_version=updates.version)
+
+    @app.get('/api/update/status')
+    def update_status():
+        return jsonify(updates.status())
+
+    @app.get('/api/update/check')
+    def update_check():
+        return jsonify(updates.check())
+
+    @app.post('/api/update/stage')
+    def update_stage():
+        payload=request.get_json() or {}
+        if not isinstance(payload,dict):
+            raise ValueError('请选择要安装的更新版本')
+        return jsonify(updates.stage(payload.get('version')))
 
     @app.post('/login')
     def login():
@@ -1066,21 +1087,38 @@ def main():
     parser.add_argument('--data-dir')
     parser.add_argument('--demo',action='store_true')
     args=parser.parse_args()
-    config=Path(__file__).parent/('storage-location-demo.json' if args.demo else 'storage-location.json')
-    root=Path(args.data_dir or os.environ.get('COMPUTE_DATA_DIR') or saved_root(config,Path(__file__).parent/('data-demo' if args.demo else 'data'))).resolve()
-    lock=root_lock(root)
+    selected=launch_selected('app.py',activate=not args.demo)
+    if selected is not None:
+        return selected
+    config=INSTALL_ROOT/('storage-location-demo.json' if args.demo else 'storage-location.json')
+    root=Path(args.data_dir or os.environ.get('COMPUTE_DATA_DIR') or saved_root(config,INSTALL_ROOT/('data-demo' if args.demo else 'data'))).resolve()
+    try:
+        lock=root_lock(root)
+    except ValueError:
+        if PROGRAM_ROOT!=INSTALL_ROOT:
+            return WORKSPACE_LOCKED
+        raise
+    candidate=PROGRAM_ROOT!=INSTALL_ROOT and not args.demo and update_state().get('pending')==program_version()
+    if candidate and workspace_busy(root):
+        lock.close()
+        return WORKSPACE_BUSY
     if args.demo:
         from scheduler.demo import seed
         app=create_app(root,config_path=config,runtime=True,initial_lock=lock)
         seed(app.extensions['engine'])
     else:
-        app=create_app(root,start=True,config_path=config,runtime=True,initial_lock=lock)
+        app=create_app(root,config_path=config,runtime=True,initial_lock=lock,enable_updates=True)
     atexit.register(app.extensions['engine'].close)
+    from waitress import create_server
+    server=create_server(app,host=args.host,port=args.port,threads=12,max_request_body_size=app.config['MAX_CONTENT_LENGTH'],channel_timeout=600)
+    if candidate:
+        mark_running(program_version())
+    if not args.demo:
+        app.extensions['engine'].start()
     print('算力工坊（Compute Studio）: http://%s:%d' % (args.host,args.port))
     print('登录令牌文件：'+str(root/'access-token.txt'))
-    from waitress import serve
-    serve(app,host=args.host,port=args.port,threads=12,max_request_body_size=app.config['MAX_CONTENT_LENGTH'],channel_timeout=600)
+    server.run()
 
 
 if __name__=='__main__':
-    main()
+    raise SystemExit(main())

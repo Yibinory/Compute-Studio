@@ -13,9 +13,10 @@ from urllib.parse import quote, urlencode
 from urllib.request import (
     HTTPCookieProcessor, HTTPRedirectHandler, ProxyHandler, Request, build_opener,
 )
+from studio_launch import INSTALL_ROOT, launch_selected
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = INSTALL_ROOT
 
 
 class StudioError(Exception):
@@ -322,6 +323,9 @@ def parser():
 
 
 def main():
+    selected=launch_selected('studio_cli.py')
+    if selected is not None:
+        return selected
     cli = parser()
     args = cli.parse_args()
     port = args.port if args.port is not None else (8777 if args.demo else 8776)

@@ -11,6 +11,7 @@ storage-location*.json
 
 # Source exports and local tooling
 release/
+.compute-updates/
 node_modules/
 .mypy_cache/
 .ruff_cache/
