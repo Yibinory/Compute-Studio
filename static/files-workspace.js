@@ -1,6 +1,11 @@
 'use strict';
 const filesWorkspaceBaseRender=render,filesWorkspaceBaseAction=handleAction,filesWorkspaceBaseSubmit=submitForm;
 const projectFileViews=new Map(),projectFileQueue=[];let projectFileWorkers=0,projectFileObserver=null,projectFilesMounted='';
+const projectFileTaskViews=new Map(), projectFileTaskPageSize=8;
+function projectFileTaskView(id){
+  if(!projectFileTaskViews.has(id))projectFileTaskViews.set(id,{offset:0,query:''});
+  return projectFileTaskViews.get(id);
+}
 function transferArgs(job){try{return JSON.parse((job.operation||'').slice((job.operation||'').indexOf(':')+1));}catch(_){return [];}}
 function uploadPageJobs(){
   const uploads=state.uploads||[],ids=new Set(uploads.map(u=>u.id)),jobs=new Set(uploads.map(u=>u.job_id).filter(Boolean));
@@ -35,22 +40,33 @@ function publicFileDeleteBlock(view){
 }
 function publicFileDeleteTools(view){
   const block=publicFileDeleteBlock(view),disabled=block||view.loading;
-  return `<div class="public-file-delete-tools"><label><input type="checkbox" data-public-file-page ${view.data?.files.length&&view.data.files.every(f=>view.selected.has(f.path))?'checked':''} ${disabled||!view.data?.files.length?'disabled':''}>选择本页</label><span>已选 ${view.selected.size} 个文件</span><div class="actions">${button('public-file-delete-selected','删除选中',`${disabled||!view.selected.size?'disabled':''}`,'small danger')}${view.selected.size?button('public-file-unselect','取消选择','','small'):''}${button('public-file-delete-all','清空全部',`${disabled||!view.data?.total_count?'disabled':''}`,'small danger')}</div></div>${block?`<p class="public-file-delete-block">${esc(block)}</p>`:''}`;
+  const hasFiles=view.data && (view.data.total_count ?? (view.data.directory || view.query || fileEntryCount(view.data)));
+  return `<div class="public-file-delete-tools"><label><input type="checkbox" data-public-file-page ${view.data?.files.length&&view.data.files.every(f=>view.selected.has(f.path))?'checked':''} ${disabled||!view.data?.files.length?'disabled':''}>选择本页</label><span>已选 ${view.selected.size} 个文件</span><div class="actions">${button('public-file-delete-selected','删除选中',`${disabled||!view.selected.size?'disabled':''}`,'small danger')}${view.selected.size?button('public-file-unselect','取消选择','','small'):''}${button('public-file-delete-all','清空全部',`${disabled||!hasFiles?'disabled':''}`,'small danger')}</div></div>${block?`<p class="public-file-delete-block">${esc(block)}</p>`:''}`;
 }
 function fileRows(view){
   if(view.error)return `<div class="notice warning">${esc(view.error)}</div>${button('project-files-refresh','重新读取',`data-scope="${esc(view.key)}"`,'small')}`;
   if(!view.data)return '<div class="loading file-loading">正在读取文件列表…</div>';
-  const data=view.data,editable=fileEditable(view),deletable=!view.task&&!publicFileDeleteBlock(view),textFile=v=>v.size<=2*1024**2&&/\.(py|js|ts|json|txt|md|yaml|yml|toml|ini|cfg|sh|csv|html|css|xml|tex|ipynb)$|(^|\/)(README|LICENSE|Dockerfile|Makefile|\.env)$/i.test(v.path);
-  return `<div class="inline-file-meta"><span>${data.total_count} 个文件 · ${size(data.total_bytes)}${view.query?' · 匹配 '+data.matched_count+' 个':''}</span><div class="actions">${view.loading?'<small>正在更新…</small>':''}${button('project-files-refresh','↻ 刷新',`data-scope="${esc(view.key)}"`,'small')}</div></div>${!view.task?publicFileDeleteTools(view):''}${data.files.length?`<div class="inline-file-table ${!view.task?'public-file-table':''}"><table><thead><tr><th>文件路径</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead><tbody>${data.files.map(v=>{const type=(v.path.split('.').pop()||'FILE').slice(0,5).toUpperCase(),url=`/api/projects/${encodeURIComponent(view.project)}/file?path=${encodeURIComponent(v.path)}&download=1${view.task?'&task_id='+encodeURIComponent(view.task):''}`;return `<tr><td>${!view.task?`<input type="checkbox" class="public-file-checkbox" data-public-file-path="${esc(v.path)}" aria-label="选择 ${esc(v.path)}" ${view.selected.has(v.path)?'checked':''} ${!deletable||view.loading?'disabled':''}>`:''}<span class="inline-file-type">${esc(type)}</span><span class="inline-file-path">${esc(v.path)}</span></td><td>${size(v.size)}</td><td>${fmt(v.modified_at)}</td><td><div class="actions">${textFile(v)?button('edit-file','编辑',`data-project="${esc(view.project)}" data-task="${esc(view.task)}" data-path="${esc(v.path)}" ${editable?'':'disabled title="任务执行或文件导入期间暂不能编辑"'}`,'small'):''}<a href="${url}" download>下载</a>${!view.task?button('public-file-delete-one','删除',`data-path="${esc(v.path)}" ${!deletable||view.loading?'disabled':''}`,'small danger'):''}</div></td></tr>`;}).join('')}</tbody></table></div>`:empty(view.query?'没有匹配文件':view.task?'暂无任务专属文件':'还没有项目公共代码',view.query?'换一个文件名或目录名试试。':view.task?'该实验可直接使用项目公共代码，也可以上传专属输入文件。':'上传代码文件、文件夹或 ZIP 后，会直接显示在这里。')}
-  <div class="inline-file-pagination"><small>${data.matched_count?data.offset+1:0}–${Math.min(data.offset+data.files.length,data.matched_count)} / ${data.matched_count}</small><div class="actions">${button('project-files-prev','上一页',`data-scope="${esc(view.key)}" ${!view.offset||view.loading?'disabled':''}`,'small')}${button('project-files-next','下一页',`data-scope="${esc(view.key)}" ${data.offset+data.limit>=data.matched_count||view.loading?'disabled':''}`,'small')}</div></div>`;
+  const data=view.data,count=fileEntryCount(data),scope=`data-scope="${esc(view.key)}"`,editable=fileEditable(view),deletable=!view.task&&!publicFileDeleteBlock(view),textFile=v=>v.size<=2*1024**2&&/\.(py|js|ts|json|txt|md|yaml|yml|toml|ini|cfg|sh|csv|html|css|xml|tex|ipynb)$|(^|\/)(README|LICENSE|Dockerfile|Makefile|\.env)$/i.test(v.path);
+  const statistics=data.folders?button('project-files-stats','全部文件统计',scope,'small'):'';
+  return fileBreadcrumb(data,'project-files-dir',scope)+`<div class="inline-file-meta"><span>${data.folders?(view.query?'匹配 ':'本目录 ')+count.toLocaleString()+' 项':data.total_count+' 个文件 · '+size(data.total_bytes)}</span><div class="actions">${view.loading?'<small>正在更新…</small>':''}${statistics}${button('project-files-refresh','↻ 刷新',`data-scope="${esc(view.key)}"`,'small')}</div></div>${!view.task?publicFileDeleteTools(view):''}${filePageLength(data)?`<div class="inline-file-table file-details-table ${!view.task?'public-file-table':''}"><table><thead><tr><th>名称</th><th>修改时间</th><th>类型</th><th>大小</th><th>操作</th></tr></thead><tbody>${fileFolderRows(data,5,'project-files-dir',scope,2)}${data.files.map(v=>{const url=`/api/projects/${encodeURIComponent(view.project)}/file?path=${encodeURIComponent(v.path)}&download=1${view.task?'&task_id='+encodeURIComponent(view.task):''}`;return `<tr><td>${!view.task?`<input type="checkbox" class="public-file-checkbox" data-public-file-path="${esc(v.path)}" aria-label="选择 ${esc(v.path)}" ${view.selected.has(v.path)?'checked':''} ${!deletable||view.loading?'disabled':''}>`:''}<span class="inline-file-path">${fileDisplayName(v.path,data)}</span></td><td>${fmt(v.modified_at)}</td><td class="file-entry-type">${esc(fileEntryType(v.path))}</td><td>${size(v.size)}</td><td><div class="actions">${textFile(v)?button('edit-file','编辑',`data-project="${esc(view.project)}" data-task="${esc(view.task)}" data-path="${esc(v.path)}" ${editable?'':'disabled title="任务执行或文件导入期间暂不能编辑"'}`,'small'):''}<a href="${url}" download>下载</a>${!view.task?button('public-file-delete-one','删除',`data-path="${esc(v.path)}" ${!deletable||view.loading?'disabled':''}`,'small danger'):''}</div></td></tr>`;}).join('')}</tbody></table></div>`:empty(view.query?'没有匹配文件':view.task?'暂无任务专属文件':'还没有项目公共代码',view.query?'换一个文件名或目录名试试。':view.task?'该实验可直接使用项目公共代码，也可以上传专属输入文件。':'上传代码文件、文件夹或 ZIP 后，会直接显示在这里。')}
+  <div class="inline-file-pagination"><small>${filePageRange(data)}</small><div class="actions">${button('project-files-prev','上一页',`data-scope="${esc(view.key)}" ${!view.offset||view.loading?'disabled':''}`,'small')}${button('project-files-next','下一页',`data-scope="${esc(view.key)}" ${data.offset+data.limit>=count||view.loading?'disabled':''}`,'small')}</div></div>`;
 }
 function fileCard(project,task){
   const view=fileView(project.id,task?.id),title=task?'#'+task.seq+' '+task.name:'项目公共代码';
   const bound=!task&&(state.code_sources||[]).some(s=>s.id===project.id&&s.path);
-  return `<section class="card inline-file-card" data-file-scope="${esc(view.key)}"><div class="card-head"><div><h3>${esc(title)}</h3><small class="muted">${task?'此实验的专属输入文件；同名文件覆盖公共代码':'供本项目全部实验使用'}</small></div>${button('upload-files',task?'上传任务文件':'上传代码 / ZIP',`data-project="${esc(project.id)}" data-task="${esc(view.task)}" ${bound?'disabled title="请在绑定的源码目录中修改"':''}`,'primary small')}</div><form class="inline-file-search" data-file-query-scope="${esc(view.key)}"><input name="query" value="${esc(view.query)}" placeholder="搜索文件名或目录名" aria-label="${esc(title)}：搜索文件" autocomplete="off"><button type="submit" class="small">搜索</button></form><div data-file-results="${esc(view.key)}">${fileRows(view)}</div></section>`;
+  return `<section class="card inline-file-card" data-file-scope="${esc(view.key)}"><div class="card-head"><div><h3>${esc(title)}</h3><small class="muted">${task?'此实验的专属输入文件；同名文件覆盖公共代码':'供本项目全部实验使用'}</small></div>${button('upload-files',task?'上传任务文件':'上传代码 / ZIP',`data-project="${esc(project.id)}" data-task="${esc(view.task)}" ${bound?'disabled title="请在绑定的源码目录中修改"':''}`,'primary small')}</div><form class="inline-file-search" data-file-query-scope="${esc(view.key)}"><input name="query" value="${esc(view.query)}" placeholder="在当前目录及子目录搜索" aria-label="${esc(title)}：搜索文件" autocomplete="off"><button type="submit" class="small">搜索</button></form><div data-file-results="${esc(view.key)}">${fileRows(view)}</div></section>`;
 }
 function projectFilesPage(project,tasks){
-  return `<div class="notice">公共代码和各实验的专属输入文件直接列在下方。文件列表显示名称、大小和修改时间；实验生成的输出仍在实验详情中查看。${state.uploads?.some(u=>u.kind==='project'&&u.project_id===project.id&&!['success','canceled'].includes(u.status))?' <a href="#uploads">文件导入记录与进度 →</a>':''}</div>${fileCard(project,null)}${tasks.length?'<div class="section-title"><h2>任务输入文件</h2><span>'+tasks.length+' 个实验</span></div>'+tasks.map(t=>fileCard(project,t)).join(''):''}`;
+  const view=projectFileTaskView(project.id),query=view.query.toLocaleLowerCase();
+  const filtered=tasks.filter(t=>('#'+t.seq+' '+t.name).toLocaleLowerCase().includes(query));
+  const lastOffset=Math.max(0,Math.ceil(filtered.length/projectFileTaskPageSize)-1)*projectFileTaskPageSize;
+  view.offset=Math.min(view.offset,lastOffset);
+  const visible=filtered.slice(view.offset,view.offset+projectFileTaskPageSize);
+  const controls=tasks.length>projectFileTaskPageSize||query
+    ?`<div class="project-file-task-controls"><form id="project-file-task-search" class="file-browser-search"><label>查找实验<input name="query" type="search" value="${esc(view.query)}" placeholder="实验名称或 #编号"></label><button type="submit" class="small">搜索</button></form><div class="actions"><small>${visible.length?view.offset+1:0}–${view.offset+visible.length} / ${filtered.length}</small>${button('project-file-tasks-prev','上一页',view.offset?'':'disabled','small')}${button('project-file-tasks-next','下一页',view.offset<lastOffset?'':'disabled','small')}</div></div>`:'';
+  const tasksMarkup=tasks.length
+    ?`<div class="section-title"><h2>任务输入文件</h2><span>${tasks.length} 个实验</span></div>${controls}${visible.map(t=>fileCard(project,t)).join('')||'<p class="file-browser-empty">没有匹配的实验</p>'}`:'';
+  return `<div class="notice">浏览项目公共代码与任务输入文件。实验输出可在实验详情中查看。${state.uploads?.some(u=>u.kind==='project'&&u.project_id===project.id&&!['success','canceled'].includes(u.status))?' <a href="#uploads">文件导入记录与进度 →</a>':''}</div>${fileBrowserCompatibility()}${fileCard(project,null)}${tasksMarkup}`;
 }
 function fileRevision(view){return JSON.stringify([state.local_storage?.root,state.projects?.find(p=>p.id===view.project)?.public_files_revision,state.uploads?.filter(u=>u.kind==='project'&&u.project_id===view.project&&(!u.task_id||u.task_id===view.task)).map(u=>[u.id,u.local_ready||u.status==='success',u.finished_at])]);}
 function updateFileRows(view){
@@ -66,7 +82,7 @@ function requestFileView(view,force=false){
 }
 async function drainFileQueue(){
   while(projectFileWorkers<3&&projectFileQueue.length){const entry=projectFileQueue.shift(),{view,seq,revision}=entry;if(view.seq!==seq)continue;projectFileWorkers++;
-    (async()=>{try{const data=await api(`/api/projects/${encodeURIComponent(view.project)}/file-index?offset=${view.offset}&limit=100&query=${encodeURIComponent(view.query)}${view.task?'&task_id='+encodeURIComponent(view.task):''}`);if(view.seq===seq){view.data=data;view.revision=revision;view.fetchedAt=Date.now();}}
+    (async()=>{try{const data=await api(`/api/projects/${encodeURIComponent(view.project)}/file-index?${fileBrowseParams(view)}${view.task?'&task_id='+encodeURIComponent(view.task):''}`);if(view.seq===seq){if(data.offset && data.offset>=fileEntryCount(data)){view.offset=Math.max(0,Math.ceil(fileEntryCount(data)/filePageSize)-1)*filePageSize;requestFileView(view,true);return;}view.data=data;view.revision=revision;view.fetchedAt=Date.now();}}
       catch(e){if(view.seq===seq){view.error=e.message;view.fetchedAt=Date.now();view.revision=revision;}}
       finally{if(view.seq===seq){view.loading=false;updateFileRows(view);}projectFileWorkers--;drainFileQueue();}})();
   }
@@ -81,6 +97,23 @@ render=function(){
 let publicFileDeleteRequest=null;
 handleAction=async function(el){
   const action=el.dataset.action;
+  if(action==='project-file-tasks-prev'||action==='project-file-tasks-next'){
+    const view=projectFileTaskView(route()[1]);
+    view.offset=Math.max(0,view.offset+(action.endsWith('next')?1:-1)*projectFileTaskPageSize);
+    render();
+    return;
+  }
+  if(action==='project-files-stats'){
+    const view=fileView(route()[1],el.dataset.scope==='code'?'':el.dataset.scope);
+    const revision=dialogRevision;
+    const params=new URLSearchParams({limit:1});
+    if(view.task)params.set('task_id',view.task);
+    const result=await api(`/api/projects/${encodeURIComponent(view.project)}/file-index?${params}`);
+    if(dialogRevision===revision&&route()[1]===view.project&&projectTab==='files'){
+      modal('全部文件统计',`<p>${result.total_count.toLocaleString()} 个文件 · ${size(result.total_bytes)}</p><p class="muted break">${esc(result.local_path)}</p>`,'project-file-stats');
+    }
+    return;
+  }
   if(action==='public-file-unselect'){const view=fileView(route()[1]);view.selected.clear();updateFileRows(view);return;}
   if(['public-file-delete-one','public-file-delete-selected','public-file-delete-all'].includes(action)){
     const view=fileView(route()[1]),block=publicFileDeleteBlock(view);if(block)throw Error(block);
@@ -95,10 +128,16 @@ handleAction=async function(el){
     publicFileDeleteRequest=null;closeDialogFor(el);const view=fileView(req.project);view.selected.clear();view.offset=0;
     state.jobs=state.jobs||[];state.jobs.push(result.job);toast('清除已提交，在操作记录中查看结果');await load();requestFileView(view,true);return;
   }
-  const a=el.dataset.action;if(!['project-files-refresh','project-files-prev','project-files-next'].includes(a))return filesWorkspaceBaseAction(el);
-  const view=fileView(route()[1],el.dataset.scope==='code'?'':el.dataset.scope);if(a==='project-files-prev')view.offset=Math.max(0,view.offset-100);if(a==='project-files-next')view.offset+=100;requestFileView(view,true);
+  const a=el.dataset.action;if(!['project-files-refresh','project-files-prev','project-files-next','project-files-dir'].includes(a))return filesWorkspaceBaseAction(el);
+  const view=fileView(route()[1],el.dataset.scope==='code'?'':el.dataset.scope);
+  if(a==='project-files-dir'){clearTimeout(view.searchTimer);Object.assign(view,{directory:el.dataset.directory,query:'',offset:0});$('[name=query]',el.closest('[data-file-scope]')).value='';}
+  if(a==='project-files-prev')view.offset=Math.max(0,view.offset-100);if(a==='project-files-next')view.offset+=100;requestFileView(view,true);
 };
 submitForm=async function(form){
+  if(form.id==='project-file-task-search'){
+    Object.assign(projectFileTaskView(route()[1]),{query:form.elements.query.value.trim(),offset:0});
+    render();return;
+  }
   if(form.dataset.fileQueryScope){const view=fileView(route()[1],form.dataset.fileQueryScope==='code'?'':form.dataset.fileQueryScope);clearTimeout(view.searchTimer);view.query=new FormData(form).get('query');view.offset=0;requestFileView(view,true);return;}
   const view=form.id==='editor-form'?fileView(form.dataset.project,form.dataset.task):null;await filesWorkspaceBaseSubmit(form);if(view){view.fetchedAt=0;requestFileView(view,true);}
 };

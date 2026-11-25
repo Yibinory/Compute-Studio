@@ -22,6 +22,17 @@ async function sourceHistory(pid,revision=null,offset=0){
   const data=await api(`/api/projects/${pid}/source/history`);
   modal('代码同步记录',`<p class="muted">新增、修改和删除均记录前后 hash。记录对应已发布版本，原始源码目录从不被删除。</p><div class="source-history">${data.versions.map(v=>`<article><div><b>${esc(v.id.slice(0,8))}</b><small>${fmt(v.at)}</small></div><span>新增 ${v.added} · 修改 ${v.modified} · 删除 ${v.deleted}</span>${button('source-record','文件明细',`data-project="${pid}" data-revision="${v.id}"`,'small')}</article>`).join('')||'<p class="muted">尚无目录同步记录；未绑定时，实际使用的输入版本会记录在运行详情中。</p>'}</div>`,'source-history');return;
  }
+ if(state.runtime_features?.file_browser){
+  const url=`/api/projects/${encodeURIComponent(pid)}/source/history/${encodeURIComponent(revision)}?`;
+  modal('同步文件明细 · '+revision.slice(0,8),'<div id="source-file-browser"></div>','source-record');
+  const hash=entry=>entry?`<code title="${esc(entry.sha256)}">${esc(entry.sha256.slice(0,16))}…</code> · ${size(entry.size)}`:'—';
+  return mountFileBrowser($('#source-file-browser'),{
+   url,columns:['名称','变更','原 SHA-256','新 SHA-256'],
+   summary:page=>`<p class="source-path">${esc(page.source)}</p><p class="muted">${fmt(page.at)} · ${page.total.toLocaleString()} 个变更</p>`,
+   empty:'此目录没有内容变更',
+   row:(file,page)=>`<tr><td>${fileDisplayName(file.path,page)}</td><td>${esc(({added:'新增',modified:'修改',deleted:'删除'})[file.action])}</td><td>${hash(file.before)}</td><td>${hash(file.after)}</td></tr>`
+  });
+ }
  const v=await api(`/api/projects/${pid}/source/history/${revision}?offset=${offset}`);sourceHistoryView={pid,revision,offset,total:v.total};
  modal('同步文件明细 · '+revision.slice(0,8),`<p class="source-path">${esc(v.source)}</p><p class="muted">${fmt(v.at)} · ${v.total} 个变更 · 显示 ${offset+1}–${Math.min(offset+v.changes.length,v.total)}</p><div class="source-diffs">${v.changes.map(c=>`<article><span class="badge ${c.action==='deleted'?'amber':'blue'}">${({added:'新增',modified:'修改',deleted:'删除'})[c.action]}</span><div><b>${esc(c.path)}</b>${c.before?`<small title="${esc(c.before.sha256)}">原 hash ${esc(c.before.sha256.slice(0,16))} · ${size(c.before.size)}</small>`:''}${c.after?`<small title="${esc(c.after.sha256)}">新 hash ${esc(c.after.sha256.slice(0,16))} · ${size(c.after.size)}</small>`:''}</div></article>`).join('')||'<p>文件内容无变化，仅更新了来源指纹。</p>'}</div><div class="actions">${button('source-record-prev','上一页',offset?'':'disabled','small')}${button('source-record-next','下一页',offset+100<v.total?'':'disabled','small')}</div>`,'source-record');
 }

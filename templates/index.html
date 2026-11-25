@@ -63,10 +63,12 @@
   <script defer src="{{ asset_url('dataset-notes.js') }}"></script>
   <link rel="stylesheet" href="{{ asset_url('task-archive.css') }}">
   <script defer src="{{ asset_url('task-archive.js') }}"></script>
+  <script defer src="{{ asset_url('file-browser.js') }}"></script>
   {% else %}
   <link rel="stylesheet" href="{{ asset_url('studio.css') }}">
   {% endif %}
   <link rel="stylesheet" href="{{ asset_url('console.css') }}">
+  {% if authorized %}<link rel="stylesheet" href="{{ asset_url('file-browser.css') }}">{% endif %}
 </head>
 <body data-authorized="{{ 'true' if authorized else 'false' }}"{% if authorized %}
       data-studio-root="{{ config.root_path }}" data-controller-port="{{ request.environ['SERVER_PORT'] }}"{% endif %}>

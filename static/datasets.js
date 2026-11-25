@@ -14,16 +14,22 @@ function datasetSummary(view){
   ${tasks.length?`<div class="section-title"><h2>使用此数据集的实验</h2><span>${tasks.length} 个实验</span></div><div class="card dataset-usage">${tasks.slice(0,20).map(t=>`<div class="file-row"><div><a href="#project/${esc(t.project_id)}">${esc(projectBy(t.project_id)?.name||'项目')}</a><span> / ${esc(t.name)}</span></div>${badge(t.status)}${button('task-detail','查看实验',`data-id="${esc(t.id)}"`,'small')}</div>`).join('')}${tasks.length>20?'<a href="#tasks">查看全部实验 →</a>':''}</div>`:''}`;
 }
 function datasetFileRows(){
-  const view=datasetDetail;if(!view)return;const target=$('#dataset-files');if(!target)return;
+  const view=datasetDetail,target=$('#dataset-files');
+  if(view&&target)afterControlInteraction(target,()=>{
+    if(target.isConnected&&datasetDetail===view)paintDatasetFileRows(view,target);
+  });
+}
+function paintDatasetFileRows(view,target){
   if(view.fileError){target.innerHTML=`<p class="error-text">${esc(view.fileError)}</p>${button('dataset-files-retry','重新加载','','small')}`;return;}
   if(!view.files){target.innerHTML='<div class="loading">正在读取文件清单…</div>';return;}
   const f=view.files;
-  target.innerHTML=`<div class="dataset-file-count"><span>${view.query?'搜索结果':'文件清单'} ${f.matched_count.toLocaleString()} 个 · 共 ${f.total_count.toLocaleString()} 个文件</span>${view.filesLoading?'<span>正在加载…</span>':''}</div>${f.files.length?`<div class="dataset-file-table"><table><thead><tr><th>文件路径</th><th>大小</th><th>SHA-256（导入时）</th><th></th></tr></thead><tbody>${f.files.map((v,i)=>`<tr><td><button class="dataset-file-name" data-action="dataset-file-info" data-index="${i}">${esc(v.path)}</button></td><td>${size(v.size)}</td><td><code title="${esc(v.sha256)}">${esc(v.sha256.slice(0,16))}…</code></td><td><a href="/api/datasets/${encodeURIComponent(view.id)}/file?path=${encodeURIComponent(v.path)}" download>下载</a></td></tr>`).join('')}</tbody></table></div>`:empty(view.query?'没有匹配的文件':'暂无文件清单',view.query?'尝试其他文件名或目录名。':'导入完成后，文件清单将在这里显示。')}
-  <div class="dataset-pagination"><small>${f.matched_count?f.offset+1:0}–${Math.min(f.offset+f.files.length,f.matched_count)} / ${f.matched_count}</small><div class="actions">${button('dataset-prev','上一页',`${view.offset===0||view.filesLoading?'disabled':''}`,'small')}${button('dataset-next','下一页',`${f.offset+f.limit>=f.matched_count||view.filesLoading?'disabled':''}`,'small')}</div></div>`;
+  const count=fileEntryCount(f);
+  target.innerHTML=fileBrowserCompatibility()+fileBreadcrumb(f,'dataset-directory')+`<div class="dataset-file-count"><span>${view.query?'搜索结果':'文件清单'} ${count.toLocaleString()} 项 · 共 ${f.total_count.toLocaleString()} 个文件</span>${view.filesLoading?'<span>正在加载…</span>':''}</div>${filePageLength(f)?`<div class="dataset-file-table file-details-table"><table><thead><tr><th>名称</th><th>类型</th><th>大小</th><th>SHA-256（导入时）</th><th>操作</th></tr></thead><tbody>${fileFolderRows(f,5,'dataset-directory','',1)}${f.files.map(v=>`<tr><td><button class="dataset-file-name" data-action="dataset-file-info" data-path="${esc(v.path)}" data-size="${v.size}" data-sha256="${esc(v.sha256)}">${fileDisplayName(v.path,f)}</button></td><td class="file-entry-type">${esc(fileEntryType(v.path))}</td><td>${size(v.size)}</td><td><code title="${esc(v.sha256)}">${esc(v.sha256.slice(0,16))}…</code></td><td><a href="/api/datasets/${encodeURIComponent(view.id)}/file?path=${encodeURIComponent(v.path)}" download>下载</a></td></tr>`).join('')}</tbody></table></div>`:empty(view.query?'没有匹配的文件':'暂无文件清单',view.query?'尝试其他文件名或目录名。':'导入完成后，文件清单将在这里显示。')}
+  <div class="dataset-pagination"><small>${filePageRange(f)}</small><div class="actions">${button('dataset-prev','上一页',`${view.offset===0||view.filesLoading?'disabled':''}`,'small')}${button('dataset-next','下一页',`${f.offset+f.limit>=count||view.filesLoading?'disabled':''}`,'small')}</div></div>`;
 }
 async function datasetLoadFiles(){
   const view=datasetDetail,seq=(view.fileSeq||0)+1;view.fileSeq=seq;view.filesLoading=true;view.fileError='';datasetFileRows();
-  try{const files=await api(`/api/datasets/${encodeURIComponent(view.id)}/files?offset=${view.offset}&limit=100&query=${encodeURIComponent(view.query)}`);if(datasetDetail!==view||view.fileSeq!==seq)return;view.files=files;}
+  try{const files=await api(`/api/datasets/${encodeURIComponent(view.id)}/files?${fileBrowseParams(view)}`);if(datasetDetail!==view||view.fileSeq!==seq)return;if(files.offset && files.offset>=fileEntryCount(files)){view.offset=Math.max(0,Math.ceil(fileEntryCount(files)/filePageSize)-1)*filePageSize;return datasetLoadFiles();}view.files=files;}
   catch(e){if(datasetDetail!==view||view.fileSeq!==seq)return;view.fileError=e.message;}
   if(datasetDetail!==view||view.fileSeq!==seq)return;view.filesLoading=false;if(route()[0]==='dataset'&&route()[1]===view.id)datasetFileRows();
 }
@@ -39,7 +45,7 @@ render=function(){
   const v=datasetDetail;
   setNavigation('datasets','数据集 / '+(v.data?.dataset.name||'详情'));
   if($('#main').dataset.datasetId!==id||!$('#dataset-summary')){
-    $('#main').innerHTML=`<a class="dataset-back" href="#datasets">← 返回数据集</a><div id="dataset-heading"></div><div id="dataset-summary"></div><section class="card dataset-inventory"><div class="card-head"><h2>本机文件清单</h2><small class="muted">每页 100 个文件</small></div><form id="dataset-search"><label>搜索文件名或目录<input name="query" value="${esc(v.query)}" placeholder="例如 train/ 或 labels.csv" autocomplete="off"></label><button type="submit">搜索</button></form><div id="dataset-files"></div></section>`;
+    $('#main').innerHTML=`<a class="dataset-back" href="#datasets">← 返回数据集</a><div id="dataset-heading"></div><div id="dataset-summary"></div><section class="card dataset-inventory"><div class="card-head"><h2>本机文件清单</h2><small class="muted">每页最多 100 项</small></div><form id="dataset-search"><label>在当前目录及子目录搜索<input name="query" value="${esc(v.query)}" placeholder="例如 train/ 或 labels.csv" autocomplete="off"></label><button type="submit">搜索</button></form><div id="dataset-files"></div></section>`;
     $('#main').dataset.datasetId=id;datasetFileRows();
   }
   $('#dataset-heading').innerHTML=pageHead(v.data?.dataset.name||'数据集详情','保存位置、服务器副本与文件清单',button('dataset-detail-refresh','刷新详情','','small'));
@@ -49,8 +55,9 @@ render=function(){
 handleAction=async function(el){
   const a=el.dataset.action,v=datasetDetail;
   if(a==='dataset-detail-refresh'){await datasetLoadSummary();await datasetLoadFiles();return;}
+  if(a==='dataset-directory'){clearTimeout(datasetSearchTimer);Object.assign(v,{directory:el.dataset.directory,query:'',offset:0});$('#dataset-search [name=query]').value='';await datasetLoadFiles();return;}
   if(['dataset-prev','dataset-next','dataset-files-retry'].includes(a)){clearTimeout(datasetSearchTimer);if(a==='dataset-prev')v.offset=Math.max(0,v.offset-100);if(a==='dataset-next')v.offset+=100;await datasetLoadFiles();return;}
-  if(a==='dataset-file-info'){const f=v.files.files[Number(el.dataset.index)];modal('数据集文件',`<h3 class="break">${esc(f.path)}</h3><p>${size(f.size)} · ${esc(v.data.dataset.name)}</p><p class="muted">导入时 SHA-256</p><code class="break">${esc(f.sha256)}</code><div class="form-footer"><a href="/api/datasets/${encodeURIComponent(v.id)}/file?path=${encodeURIComponent(f.path)}" download>下载本机文件 →</a></div>`,'dataset-file');return;}
+  if(a==='dataset-file-info'){const f=el.dataset;modal('数据集文件',`<h3 class="break">${esc(f.path)}</h3><p>${size(Number(f.size))} · ${esc(v.data.dataset.name)}</p><p class="muted">导入时 SHA-256</p><code class="break">${esc(f.sha256)}</code><div class="form-footer"><a href="/api/datasets/${encodeURIComponent(v.id)}/file?path=${encodeURIComponent(f.path)}" download>下载本机文件 →</a></div>`,'dataset-file');return;}
   return datasetBaseAction(el);
 };
 submitForm=async function(form){if(form.id!=='dataset-search')return datasetBaseSubmit(form);clearTimeout(datasetSearchTimer);datasetDetail.query=new FormData(form).get('query');datasetDetail.offset=0;await datasetLoadFiles();};

@@ -21,7 +21,8 @@ from werkzeug.exceptions import HTTPException
 import paramiko
 
 from scheduler.engine import Engine
-from scheduler.files import confined, extract_zip, file_metadata, manifest, name, relative
+from scheduler.files import confined, digest, extract_zip, file_metadata, manifest, name, relative
+from scheduler.file_browser import browse_directory, directory_page, disk_page
 from scheduler.task_imports import BatchImports,save_task,SCRIPT_LIMIT
 from scheduler.file_process import run as file_process
 from scheduler.policy import ACTIVE
@@ -149,7 +150,7 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
         active_uploads=BUSY
         visible_uploads=[uploads.public(u) for i,u in enumerate(all_uploads) if i>=len(all_uploads)-100 or u['status'] in active_uploads]
         visible_jobs=[public_job(j) for j in all_jobs]
-        return jsonify(runtime_features={'async_runtime':True,'task_environments':True,'content_store':True,'batch_states':True,'batch_queue':True,'import_configuration':True,'project_archive':True,'task_archive':True,'result_tables':True,'result_dataset_tables':True,'named_result_tables':True,'dataset_notes':True,'code_sync':True},code_sources=engine.store.all('code_sources'),servers=servers,projects=engine.store.all('projects'),tasks=tasks,notes=engine.store.summaries('notes'),storage=[engine.current_sharing(scope) for scope in ('work','data')],local_storage=local_storage.info(),uploads=visible_uploads,datasets=datasets,replicas=engine.store.summaries('replicas'),jobs=visible_jobs,settings=engine.settings,events=engine.store.events())
+        return jsonify(runtime_features={'async_runtime':True,'task_environments':True,'content_store':True,'batch_states':True,'batch_queue':True,'import_configuration':True,'project_archive':True,'task_archive':True,'result_tables':True,'result_dataset_tables':True,'named_result_tables':True,'dataset_notes':True,'code_sync':True,'file_browser':True},code_sources=engine.store.all('code_sources'),servers=servers,projects=engine.store.all('projects'),tasks=tasks,notes=engine.store.summaries('notes'),storage=[engine.current_sharing(scope) for scope in ('work','data')],local_storage=local_storage.info(),uploads=visible_uploads,datasets=datasets,replicas=engine.store.summaries('replicas'),jobs=visible_jobs,settings=engine.settings,events=engine.store.events())
 
     @app.get('/api/experiment-guide')
     def experiment_guide():
@@ -194,7 +195,12 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
         value=json.loads(confined(engine.code_sources.folder(project_id),'changes/'+revision+'.json').read_text(encoding='utf-8'))
         offset=int(request.args.get('offset',0));limit=int(request.args.get('limit',100))
         if offset<0 or not 1<=limit<=200:raise ValueError('分页参数无效')
-        changes=value.pop('changes');return jsonify(**value,changes=changes[offset:offset+limit],total=len(changes),offset=offset,limit=limit)
+        changes=value.pop('changes')
+        directory=request_directory()
+        if directory is not None:
+            page=directory_page(((c['path'],c) for c in changes),directory,request.args.get('query',''),offset,limit)
+            return jsonify(**value,**page,total=len(changes))
+        return jsonify(**value,changes=changes[offset:offset+limit],total=len(changes),offset=offset,limit=limit)
 
     def public_job(job):
         value=dict(job)
@@ -204,7 +210,16 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
 
     def transfer_page(job_id):
         return engine.transfers.page(job_id,offset=int(request.args.get('offset',0)),limit=int(request.args.get('limit',100)),
-                                     query=request.args.get('query','').strip(),server=request.args.get('server',''),status=request.args.get('status',''))
+                                     query=request.args.get('query','').strip(),server=request.args.get('server',''),
+                                     status=request.args.get('status',''),directory=request_directory())
+
+    def request_directory():
+        return browse_directory(request.args['directory']) if 'directory' in request.args else None
+
+    def browser_options():
+        offset=int(request.args.get('offset',0));limit=int(request.args.get('limit',100))
+        if offset<0 or not 1<=limit<=200:raise ValueError('分页参数无效')
+        return request.args.get('query','').strip(),offset,limit
 
     @app.get('/api/transfers')
     def transfers_list():
@@ -244,12 +259,26 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
         offset=int(request.args.get('receipt_offset',0));limit=int(request.args.get('limit',100))
         if offset<0 or not 1<=limit<=200:raise ValueError('分页参数无效')
         query=request.args.get('query','').strip().casefold()
-        files,matched=uploads.files.page(upload_id,offset,limit,query)
+        directory=request_directory()
+        file_view=request.args.get('file_view')
+        receipts=None
+        if directory is not None and file_view=='files':
+            files,matched=[],0
+        elif directory is None:
+            files,matched=uploads.files.page(upload_id,offset,limit,query)
+        else:
+            receipts=uploads.files.browse(upload_id,offset,limit,query,directory)
+            files,matched=receipts['files'],receipts['entry_count']
         jobs=sorted((public_job(j) for j in engine.store.summaries('jobs') if j.get('operation')=='process:'+json.dumps([upload_id],ensure_ascii=False)),key=lambda j:j['created_at'],reverse=True)
         job_id=request.args.get('job_id') or upload.get('job_id')
         if job_id and not any(j['id']==job_id for j in jobs):raise ValueError('操作不属于此上传')
-        details=transfer_page(job_id) if job_id else {'files':[],'total_count':0,'matched_count':0,'offset':0,'limit':limit,'summary':[]}
+        details={'files':[],'total_count':0,'matched_count':0,'offset':0,'limit':limit,'summary':[]}
+        if job_id and (directory is None or file_view!='receipts'):
+            details=transfer_page(job_id)
+        elif directory is not None:
+            details.update(folders=[],directory=directory,entry_count=0)
         return jsonify(upload=uploads.public(upload),receipts=files,receipt_total=upload.get('file_count',0),receipt_matched=matched,receipt_offset=offset,
+                       **({'receipt_folders':receipts['folders']} if receipts is not None else {}),
                        jobs=jobs,job=next((j for j in jobs if j['id']==job_id),None),**details)
 
     @app.get('/api/local-storage')
@@ -531,7 +560,19 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
 
     @app.get('/api/tasks/<task_id>/inspection')
     def inspection(task_id):
-        return jsonify(node(engine.store.get('tasks',task_id),engine.store.summaries('notes')))
+        notes=engine.store.summaries('notes')
+        if request_directory() is not None:
+            value=engine.store.get_summary('tasks',task_id)
+            value.pop('outputs',None)
+            return jsonify(**value,notes=[n for n in notes if n['task_id']==task_id])
+        return jsonify(node(engine.store.get('tasks',task_id),notes))
+
+    @app.get('/api/tasks/<task_id>/output-index')
+    def output_index(task_id):
+        value=node(engine.store.get('tasks',task_id),[])
+        query,offset,limit=browser_options()
+        page=directory_page(((f['path'],f) for f in value['outputs']),request_directory() or '',query,offset,limit)
+        return jsonify(**page,total_count=len(value['outputs']),attempt_id=value.get('attempt_id'),synced_at=value.get('synced_at'))
 
     @app.post('/api/tasks/<task_id>/notes')
     def task_notes(task_id):
@@ -647,7 +688,11 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
             return send_file(source,as_attachment=True,download_name=Path(path).name)
         offset=int(request.args.get('offset',0));limit=int(request.args.get('limit',100))
         if offset<0 or not 1<=limit<=200:raise ValueError('分页参数无效')
-        query=request.args.get('query','').casefold();rows=[{'path':p,**v} for p,v in sorted(files.items()) if query in p.casefold()]
+        query=request.args.get('query','').casefold()
+        directory=request_directory()
+        if directory is not None:
+            return jsonify(**directory_page(files.items(),directory,query,offset,limit),total=len(files),scope=scope)
+        rows=[{'path':p,**v} for p,v in sorted(files.items()) if query in p.casefold()]
         return jsonify(files=rows[offset:offset+limit],total=len(rows),offset=offset,scope=scope)
 
     @app.post('/api/projects/<project_id>/storage/compact')
@@ -670,6 +715,11 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
     @app.get('/api/tasks/<task_id>/input-plan')
     def content_plan_read(task_id):
         engine.store.get('tasks',task_id);value=engine.store.get('input_plans',task_id)
+        directory=request_directory()
+        if directory is not None:
+            query,offset,limit=browser_options()
+            files=value.pop('files')
+            return jsonify(**value,**directory_page(files.items(),directory,query,offset,limit),total_count=len(files))
         return jsonify(value)
 
     @app.post('/api/settings')
@@ -721,8 +771,17 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
         target=scope_root(project_id,request.args.get('task_id'))
         offset=int(request.args.get('offset',0));limit=int(request.args.get('limit',100))
         if offset<0 or not 1<=limit<=200:raise ValueError('分页参数无效')
-        inventory=file_metadata(target)
         query=request.args.get('query','').strip().casefold()
+        directory=request_directory()
+        if directory is not None and not query:
+            return jsonify(**disk_page(target,directory,offset,limit),local_path=str(target))
+        inventory=file_metadata(confined(target,directory) if directory else target)
+        if directory:
+            for entry in inventory:
+                entry['path']=directory+'/'+entry['path']
+        if directory is not None:
+            page=directory_page(((f['path'],f) for f in inventory),directory,query,offset,limit)
+            return jsonify(**page,local_path=str(target))
         selected=[v for v in inventory if query in v['path'].casefold()]
         return jsonify(files=selected[offset:offset+limit],total_count=len(inventory),matched_count=len(selected),
                        total_bytes=sum(v['size'] for v in inventory),offset=offset,limit=limit,local_path=str(target))
@@ -788,7 +847,16 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
 
     @app.get('/api/projects/<project_id>/replicas/<server_id>')
     def replica(project_id,server_id):
-        return jsonify(engine.store.get('replicas',project_id+':'+server_id))
+        value=engine.store.get('replicas',project_id+':'+server_id)
+        directory=request_directory()
+        if directory is None:
+            return jsonify(value)
+        query,offset,limit=browser_options()
+        files=value.get('files',{})
+        differences=value.get('differences',[])
+        rows=((f['path'],f) for f in differences) if request.args.get('scope')=='differences' else files.items()
+        return jsonify(**directory_page(rows,directory,query,offset,limit),checked_at=value.get('checked_at'),
+                       total_count=len(files),difference_count=len(differences))
 
     @app.post('/api/projects/<project_id>/scan')
     def scan(project_id):
@@ -864,6 +932,28 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
         if request.args.get('path'):
             path=pool.artifact(attempt,request.args['path']) if catalog else confined(result,request.args['path'])
             return send_file(path,as_attachment=True,download_name=Path(request.args['path']).name)
+        if request.args.get('hash_path'):
+            path=relative(request.args['hash_path'])
+            if catalog:
+                item=catalog.get('outputs',catalog.get('artifacts',{})).get(path)
+                if not item:abort(404,description='文件不在运行清单中')
+                return jsonify(sha256=item['sha256'])
+            target=confined(result,path)
+            if not target.is_file():abort(404,description='文件不存在')
+            return jsonify(sha256=digest(target))
+        directory=request_directory()
+        if directory is not None:
+            query,offset,limit=browser_options()
+            if catalog:
+                files=catalog.get('outputs',catalog.get('artifacts',{}))
+                page=directory_page(files.items(),directory,query,offset,limit)
+            elif query:
+                folder=confined(result,directory) if directory else result
+                prefix=directory+'/' if directory else ''
+                page=directory_page(((prefix+f['path'],f) for f in file_metadata(folder)),directory,query,offset,limit)
+            else:
+                page=disk_page(result,directory,offset,limit)
+            return jsonify(**page,local_path=str(pool.root if catalog else result),attempt_id=attempt)
         return jsonify(files=catalog.get('outputs',catalog.get('artifacts',{})) if catalog else manifest(result),local_path=str(pool.root) if catalog else str(result),attempt_id=attempt)
 
     def dataset_record(dataset_id):
@@ -915,6 +1005,9 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
         if offset<0 or not 1<=limit<=200:
             raise ValueError('分页参数无效：offset ≥ 0，limit 为 1–200')
         query=request.args.get('query','').strip().casefold()
+        directory=request_directory()
+        if directory is not None:
+            return jsonify(**directory_page(inventory.items(),directory,query,offset,limit),total_count=len(inventory))
         paths=sorted((p for p in inventory if query in p.casefold()),key=lambda p:(p.casefold(),p))
         return jsonify(files=[{'path':p,**inventory[p]} for p in paths[offset:offset+limit]],
                        total_count=len(inventory),matched_count=len(paths),offset=offset,limit=limit)

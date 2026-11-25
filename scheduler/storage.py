@@ -6,6 +6,7 @@ import threading
 import time
 import uuid
 import logging
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -94,6 +95,17 @@ class Store:
             self.db.close()
             for handler in self.log.handlers[:]:
                 handler.close();self.log.removeHandler(handler)
+
+    @contextmanager
+    def read_snapshot(self):
+        """Run a potentially large read against WAL without holding the writer lock."""
+        with self.lock:
+            db = sqlite3.connect((self.root/'compute.sqlite3').as_uri()+'?mode=ro', uri=True)
+        try:
+            db.execute('BEGIN')
+            yield db
+        finally:
+            db.close()
 
     def put(self, kind, value):
         raw=json.dumps(value,ensure_ascii=False)

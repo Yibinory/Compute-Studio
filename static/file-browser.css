@@ -1,0 +1,121 @@
+.file-breadcrumb,
+.file-browser-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.file-browser-location {
+  display: flex;
+  align-items: stretch;
+  gap: 7px;
+  margin: 10px 0 12px;
+}
+.file-breadcrumb {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 4px;
+  padding: 3px 8px;
+  background: #f2f6fb;
+  border: 1px solid #e1e8f1;
+  border-radius: 8px;
+  font-size: 13px;
+  min-height: 36px;
+}
+.file-browser-location .file-up {
+  flex: 0 0 36px;
+  padding: 0;
+  min-height: 36px;
+  font-size: 18px;
+  color: #315983;
+}
+.file-browser-location .file-up:disabled { color: #718298; }
+.file-breadcrumb .file-crumb,
+.file-current-dir {
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px 6px;
+  overflow-wrap: anywhere;
+}
+.file-breadcrumb .file-crumb { min-height: 24px; border: 0; background: transparent; color: #285d9c; }
+.file-breadcrumb .file-crumb:hover { background: #e4edf9; }
+.file-current-dir { font-weight: 600; color: #243a54; }
+.file-crumb-divider { color: #68829f; }
+.file-details-table table { width: 100%; border-collapse: collapse; }
+.file-details-table thead th { padding: 10px 12px; background: #edf3f9; color: #3b566f; }
+.file-details-table tbody td { padding: 5px 12px; height: 36px; vertical-align: middle; }
+.file-details-table tbody tr:hover > td { background: #eef5fc; }
+.file-details-table .file-folder-row > td { background: #fafcfe; }
+.file-details-table .file-folder-row > td:first-child { padding: 0 12px; }
+.file-details-table .file-entry-type { color: #5c7288; font-size: 12px; white-space: nowrap; }
+.inline-file-table.file-details-table th:first-child { width: 44%; }
+.inline-file-table.file-details-table th:nth-child(2) { width: 17%; }
+.inline-file-table.file-details-table th:nth-child(3),
+.inline-file-table.file-details-table th:nth-child(4) { width: 10%; }
+.inline-file-table.file-details-table th:last-child { width: 19%; }
+.file-folder-row .file-folder-button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  text-align: left;
+  overflow-wrap: anywhere;
+  min-height: 34px;
+  padding: 5px 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: #223d5a;
+  font-weight: 550;
+  font-size: 13px;
+}
+.file-folder-row .file-folder-button:hover { background: transparent; }
+.file-folder-row .file-folder-button:focus-visible { outline-offset: -1px; }
+.file-folder-button > span:last-child { min-width: 0; }
+.public-file-table .file-folder-row .file-folder-button { padding-inline-start: 25px; }
+.file-entry-name { display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 9px; overflow-wrap: anywhere; }
+.file-entry-name > span:last-child { min-width: 0; }
+.file-folder-icon {
+  width: 19px;
+  height: 13px;
+  position: relative;
+  flex: none;
+  border: 1px solid #c18d2f;
+  border-radius: 3px;
+  background: linear-gradient(#ffdb80, #f1b84e);
+}
+.file-folder-icon::before {
+  content: '';
+  position: absolute;
+  top: -5px;
+  left: -1px;
+  width: 9px;
+  height: 5px;
+  border: 1px solid #c18d2f;
+  border-bottom: 0;
+  border-radius: 2px 2px 0 0;
+  background: #efb44b;
+}
+.file-document-icon {
+  width: 14px;
+  height: 16px;
+  margin-inline: 2.5px;
+  flex: none;
+  border: 1px solid #8da5bc;
+  border-radius: 2px 4px 2px 2px;
+  background: linear-gradient(#aec1d3,#aec1d3) center 8px / 6px 1px no-repeat,
+              linear-gradient(#aec1d3,#aec1d3) center 11px / 6px 1px no-repeat, #fff;
+}
+.file-browser-compatibility { margin: 8px 0 12px; padding: 7px 10px; border-radius: 6px; background: #fff6e2; color: #81581e; font-size: 12px; }
+.file-browser-search { display: flex; align-items: end; gap: 8px; margin: 10px 0; }
+.file-browser-search label { min-width: 0; flex: 1; }
+.file-browser-table { max-height: min(54vh, 480px); overflow: auto; border: 1px solid #e1e8f1; border-radius: 8px; }
+.file-browser-table th { position: sticky; top: 0; z-index: 1; background: #f5f8fc; }
+.file-browser-table td:first-child { overflow-wrap: anywhere; }
+.file-browser-empty { padding: 16px; color: #596f89; background: #f8fafc; border-radius: 8px; }
+.file-browser-pagination { margin-top: 8px; color: #596f89; }
+.project-file-task-controls { display: flex; align-items: end; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 14px; }
+.project-file-task-controls form { flex: 1 1 230px; margin: 0; }
+.project-file-task-controls .actions { align-items: center; }

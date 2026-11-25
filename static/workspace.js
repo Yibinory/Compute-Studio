@@ -19,7 +19,31 @@ function sharingPanel(scope){const value=(state.storage||[]).find(s=>s.scope===s
 replicasPage=function(p){return `<div class="grid storage-grid">${sharingPanel('work')}${sharingPanel('data')}</div>`+baseReplicas(p);};
 serversPage=function(){return baseServers()+`<div class="section-title"><h2>存储共享关系</h2><span>配置变化时探测 · 可手动重新探测</span></div><div class="grid">${sharingPanel('work')}${sharingPanel('data')}</div>`;};
 render=function(){if(route()[0]!=='benchmarks'){baseRender();return;}setNavigation('benchmarks','GPU 性能测试');$('#main').innerHTML=(state.settings.demo?'<div class="notice warning">演示数据 · 性能结果为模拟值。</div>':'')+benchmarksPage();};
-async function inspectionPanel(id){const t=await api(`/api/tasks/${id}/inspection`);if(!$('#dialog').open||dialogKind!=='task-detail'||selectedTask!==id)return;let el=$('#node-inspection');if(!el){el=document.createElement('section');el.id='node-inspection';$('#task-log').before(el);}const signature=JSON.stringify([id,t.notes.map(n=>[n.id,n.updated_at,n.body_chars]),t.outputs,t.synced_at]);if(el.dataset.signature===signature)return;el.dataset.signature=signature;el.innerHTML=`<div class="section-title"><h3>实验输出</h3><span>${t.outputs.length} 个新增 / 修改文件</span></div><p class="muted">${t.synced_at?'已回传并通过 SHA-256 校验 · '+fmt(t.synced_at):'实验结束并完成回传后显示输出；原始代码和未修改的前序文件不计入输出。'}</p><div class="output-list">${t.outputs.map(v=>`<div class="file-row"><span>${esc(v.path)} <small>${v.change==='created'?'新增':'修改'} · ${size(v.size)}</small></span>${t.synced_at?`<a href="/api/tasks/${id}/artifacts?attempt_id=${t.attempt_id}&path=${encodeURIComponent(v.path)}">下载</a>`:badge('syncing','未回传')}</div>`).join('')}</div><div class="section-title"><h3>节点 Notes</h3><span>执行过程中也可记录</span></div><div class="notes-list">${t.notes.map(n=>`<article class="note">${noteDocumentMarkup(n)}<div class="note-meta"><time>${fmt(n.updated_at)}</time>${button('note-download','MD',`data-note="${n.id}" title="Markdown"`,'small')}${button('edit-note','编辑',`data-id="${id}" data-note="${n.id}"`,'small')}${button('delete-note','删除',`data-id="${id}" data-note="${n.id}"`,'small danger')}</div></article>`).join('')||'<p class="muted">记录参数、观察、待办或实验结论。</p>'}</div>${noteEditorMarkup(id)}<div class="section-title"><h3>运行日志</h3></div>`;noteEditorMount($('#note-form'));}
+async function inspectionPanel(id){
+  const browse=state.runtime_features?.file_browser;
+  const t=await api(`/api/tasks/${id}/inspection${browse?'?directory=':''}`);
+  if(!$('#dialog').open||dialogKind!=='task-detail'||selectedTask!==id)return;
+  let el=$('#node-inspection');
+  if(!el){el=document.createElement('section');el.id='node-inspection';$('#task-log').before(el);}
+  const outputCount=t.output_count??t.outputs.length;
+  const signature=JSON.stringify([id,t.notes.map(n=>[n.id,n.updated_at,n.body_chars]),browse?outputCount:t.outputs,t.attempt_id,t.synced_at]);
+  if(el.dataset.signature===signature)return;
+  await new Promise(resolve => afterControlInteraction(el,resolve));
+  if(!el.isConnected||dialogKind!=='task-detail'||selectedTask!==id||el.dataset.signature===signature)return;
+  el.dataset.signature=signature;
+  const output=browse
+    ? (outputCount?'<div id="inspection-output-files"></div>':'')
+    : `<div class="output-list">${t.outputs.map(v=>`<div class="file-row"><span>${esc(v.path)} <small>${v.change==='created'?'新增':'修改'} · ${size(v.size)}</small></span>${t.synced_at?`<a href="/api/tasks/${id}/artifacts?attempt_id=${t.attempt_id}&path=${encodeURIComponent(v.path)}">下载</a>`:badge('syncing','未回传')}</div>`).join('')}</div>`;
+  el.innerHTML=`<div class="section-title"><h3>实验输出</h3><span>${outputCount.toLocaleString()} 个新增 / 修改文件</span></div><p class="muted">${t.synced_at?'已回传并通过 SHA-256 校验 · '+fmt(t.synced_at):'实验结束并完成回传后显示输出；原始代码和未修改的前序文件不计入输出。'}</p>${output}<div class="section-title"><h3>节点 Notes</h3><span>执行过程中也可记录</span></div><div class="notes-list">${t.notes.map(n=>`<article class="note">${noteDocumentMarkup(n)}<div class="note-meta"><time>${fmt(n.updated_at)}</time>${button('note-download','MD',`data-note="${n.id}" title="Markdown"`,'small')}${button('edit-note','编辑',`data-id="${id}" data-note="${n.id}"`,'small')}${button('delete-note','删除',`data-id="${id}" data-note="${n.id}"`,'small danger')}</div></article>`).join('')||'<p class="muted">记录参数、观察、待办或实验结论。</p>'}</div>${noteEditorMarkup(id)}<div class="section-title"><h3>运行日志</h3></div>`;noteEditorMount($('#note-form'));
+  const browser=$('#inspection-output-files',el);
+  if(browser)mountFileBrowser(browser,{
+    url:`/api/tasks/${encodeURIComponent(id)}/output-index?`,
+    columns:['名称','变更','大小','操作'],
+    row:(file,page)=>`<tr><td>${fileDisplayName(file.path,page)}</td><td>${file.change==='created'?'新增':'修改'}</td><td>${size(file.size)}</td><td>${page.synced_at
+      ?fileDownload(`/api/tasks/${encodeURIComponent(id)}/artifacts?attempt_id=${encodeURIComponent(page.attempt_id)}&path=`,file.path)
+      :badge('syncing','未回传')}</td></tr>`
+  });
+}
 taskDetail=async function(id){const detail=baseDetail(id);await inspectionPanel(id);await detail;};
 async function waitJob(job){const deadline=Date.now()+240000;while(Date.now()<deadline){const snapshot=await api('/api/state'),value=snapshot.jobs.find(j=>j.id===job.id);if(value?.status==='failed')throw Error(value.error);if(value?.status==='success')return value.result;await new Promise(resolve=>setTimeout(resolve,800));}throw Error('核验仍在后台执行，请在操作记录查看结果并重试预览');}
 handleAction=async function(el){const a=el.dataset.action,id=el.dataset.id;

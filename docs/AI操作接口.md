@@ -180,6 +180,16 @@ for dataset in client.json("/api/state")["datasets"]:
 
 传输详情中的哈希和时间表示该次作业的实际观测。同一文件在多台服务器核验通过时，接口仍分别返回各服务器的记录。需要确认现在的文件内容时，发起新的 `verify` 作业。数据结构与维护流程见[项目架构与存储](./项目架构与存储.md)。
 
+### 按目录浏览文件清单
+
+项目文件索引、数据集文件、运行文件、实验产物、服务器副本和传输详细记录均支持 `directory` 查询参数。传入空字符串打开根目录，传入 `train/images` 打开对应的相对目录。省略 `directory` 时沿用原接口的返回格式。
+
+- 目录分页先列子目录，再列直接子文件。使用 `offset` 和 `limit` 分页，文件夹与文件共同占用页容量。标准目录响应包含 `folders`（相对路径数组）、`files`（文件记录）与 `entry_count`（目录项或匹配项总数）。
+- 带 `query` 时，在当前目录及其所有子目录递归搜索，分页返回匹配文件。下载、编辑和文件操作继续使用返回的完整相对 `path`。
+- 服务器副本附加 `scope=differences` 可浏览公共代码差异。传输核验结果按文件与目标位置分页。上传收件清单使用 `receipt_folders`、`receipts`、`receipt_matched` 和 `receipt_offset`。
+- `GET /api/tasks/{task_id}/output-index?directory=` 单独分页读取实验新增或修改的输出，返回运行 ID 和回传时间，供下载时定位对应的运行。
+- 历史运行产物如未记录 SHA-256，可在产物接口传入 `attempt_id` 与 `hash_path` 查询单个文件的散列。
+
 ## 操作项目结果表
 
 令 `P=/api/projects/{project_id}/results`。下面操作通过本机会话鉴权，写请求使用相同的 CSRF 机制。查询参数里的数据集名称须做 URL 编码。

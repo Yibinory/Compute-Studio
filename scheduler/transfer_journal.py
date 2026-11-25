@@ -3,6 +3,7 @@ import json
 import time
 from itertools import islice
 from .transfer_storage import JournalWriter, initialize
+from .file_browser import sql_directory_page
 
 
 def product_servers(servers,inventory):
@@ -146,7 +147,7 @@ class TransferJournal:
             return status,done
         self._change_rows(job,finish,pending=True)
 
-    def page(self,job_id,offset=0,limit=100,query='',server='',status=''):
+    def page(self,job_id,offset=0,limit=100,query='',server='',status='',directory=None):
         if offset<0 or not 1<=limit<=200:raise ValueError('分页参数无效')
         where=['s.job_id=?']
         args=[job_id]
@@ -159,15 +160,26 @@ class TransferJournal:
         if status:
             where.append('e.status=?')
             args.append(status)
+        if directory:
+            where.append('p.path>=? AND p.path<?')
+            args.extend((directory+'/',directory+'0'))
         condition=' WHERE '+' AND '.join(where)
+        entries=(' FROM transfer_scopes s JOIN transfer_entries e ON e.scope=s.id '
+                 'JOIN transfer_paths p ON p.id=e.file')
+        if directory is not None:
+            with self.store.read_snapshot() as db:
+                source = 'SELECT p.path,e.scope AS key1,e.file AS key2'+entries+condition
+                folders, keys, count = sql_directory_page(db, source, args, directory, query, offset, limit)
+                files = self._browse_rows(db,keys)
+                counts = self._page_counts(db,job_id)
+            return {'files':files,'folders':folders,'entry_count':count,'directory':directory,
+                    'total_count':sum(n for _,_,n in counts),'matched_count':count,'offset':offset,'limit':limit,
+                    'summary':[{'server_id':sid,'status':s,'count':n} for sid,s,n in counts]}
         with self.store.lock:
-            scopes=self.store.db.execute('SELECT id,server_id FROM transfer_scopes WHERE job_id=? ORDER BY server_id',(job_id,)).fetchall()
-            counts=[(sid,st,count) for scope,sid in scopes for st,count in self.store.db.execute(
-                'SELECT status,count(*) FROM transfer_entries WHERE scope=? GROUP BY status',(scope,))]
+            counts=self._page_counts(self.store.db,job_id)
             total=sum(count for _,_,count in counts)
             candidates=sum(n for sid,st,n in counts if (not server or server==sid) and (not status or status==st))
-            entries=(' FROM transfer_scopes s JOIN transfer_entries e ON e.scope=s.id '
-                     'JOIN transfer_paths p ON p.id=e.file')
+            summary=[{'server_id':sid,'status':s,'count':count} for sid,s,count in counts]
             matched=self.store.db.execute('SELECT count(*)'+entries+condition,args).fetchone()[0] if query else candidates
             # A large result can stream directly in display order. Small or rare
             # subsets are cheaper to sort than walking the global path dictionary.
@@ -182,4 +194,24 @@ class TransferJournal:
                 'CROSS JOIN transfer_file_rows f ON f.scope_key=page.scope AND f.path_key=page.file '
                 'ORDER BY page.path COLLATE NOCASE,page.sid,page.path',args+[limit,offset]).fetchall()
         return {'files':[{**json.loads(raw),'status':s,'action':a,'initial_state':initial,'bytes':done,'total':length} for s,a,initial,done,length,raw in rows],
-                'total_count':total,'matched_count':matched,'offset':offset,'limit':limit,'summary':[{'server_id':sid,'status':s,'count':count} for sid,s,count in counts]}
+                'total_count':total,'matched_count':matched,'offset':offset,'limit':limit,'summary':summary}
+
+    @staticmethod
+    def _page_counts(db, job_id):
+        scopes=db.execute('SELECT id,server_id FROM transfer_scopes WHERE job_id=? ORDER BY server_id',(job_id,)).fetchall()
+        return [(sid,st,count) for scope,sid in scopes for st,count in db.execute(
+            'SELECT status,count(*) FROM transfer_entries WHERE scope=? GROUP BY status',(scope,))]
+
+    @staticmethod
+    def _browse_rows(db, keys):
+        if not keys:
+            return []
+        values = ','.join('(?,?)' for _ in keys)
+        rows = db.execute(
+            f'WITH page(scope,file) AS (VALUES {values}) '
+            'SELECT page.scope,page.file,f.status,f.action,f.initial_state,f.bytes,f.total,f.data '
+            'FROM page CROSS JOIN transfer_file_rows f ON f.scope_key=page.scope AND f.path_key=page.file',
+            [item for key in keys for item in key])
+        by_key = {(scope,file): {**json.loads(raw),'status':s,'action':a,'initial_state':initial,'bytes':done,'total':length}
+                  for scope,file,s,a,initial,done,length,raw in rows}
+        return [by_key[key] for key in keys if key in by_key]

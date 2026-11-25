@@ -1,5 +1,6 @@
 """Upload receipts live in indexed rows, never in repeatedly rewritten JSON."""
 import json
+from .file_browser import sql_directory_page
 
 
 class UploadFiles:
@@ -37,3 +38,24 @@ class UploadFiles:
             count=self.store.db.execute('SELECT count(*) FROM upload_files WHERE upload_id=? AND instr(search,?)>0',(key,query)).fetchone()[0]
             rows=self.store.db.execute('SELECT idx,data,received FROM upload_files WHERE upload_id=? AND instr(search,?)>0 ORDER BY idx LIMIT ? OFFSET ?',(key,query,limit,offset)).fetchall()
         return [{**json.loads(raw),'index':idx,'received':done} for idx,raw,done in rows],count
+
+    def browse(self, key, offset, limit, query, directory):
+        entries = 'SELECT path,idx AS key1,NULL AS key2 FROM upload_files WHERE upload_id=?'
+        args = [key]
+        if directory:
+            entries += ' AND path>=? AND path<?'
+            args.extend((directory+'/', directory+'0'))
+        if query:
+            entries += ' AND instr(search,?)>0'
+            args.append(query.casefold())
+        with self.store.read_snapshot() as db:
+            folders, keys, total = sql_directory_page(db, entries, args, directory, query, offset, limit)
+            indices = [idx for idx, _ in keys]
+            by_index = {}
+            if indices:
+                placeholders = ','.join('?' for _ in indices)
+                rows = db.execute(
+                    f'SELECT idx,data,received FROM upload_files WHERE upload_id=? AND idx IN ({placeholders})',
+                    [key, *indices])
+                by_index = {idx: {**json.loads(raw),'index':idx,'received':done} for idx,raw,done in rows}
+        return {'folders': folders, 'files': [by_index[idx] for idx in indices], 'entry_count':total}

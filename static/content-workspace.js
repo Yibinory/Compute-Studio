@@ -80,6 +80,14 @@ function contentPolicyOpen(id){
 let contentRunView=null;
 async function contentRunFilesLoad(){
  const view=contentRunView,target=$('#content-run-file-list');if(!view||!target)return;
+ if(state.runtime_features?.file_browser){
+   const url=`/api/projects/${encodeURIComponent(view.project)}/runs/${encodeURIComponent(view.attempt)}/files?scope=${encodeURIComponent(view.scope)}&`;
+   return mountFileBrowser(target,{
+     url,columns:['名称','大小','SHA-256','操作'],
+     summary:page=>`<p class="muted">共 ${page.total.toLocaleString()} 个文件 · ${view.scope==='inputs'?'输入快照引用':view.scope==='workspace'?'完整快照引用':'本节点自身输出'}</p>`,
+     row:(file,page)=>`<tr><td>${fileDisplayName(file.path,page)}</td><td>${size(file.size)}</td><td><code title="${esc(file.sha256)}">${esc(file.sha256?.slice(0,16)||'旧副本')}</code></td><td>${fileDownload(url+'path=',file.path)}</td></tr>`
+   });
+ }
  const result=await api(`/api/projects/${view.project}/runs/${view.attempt}/files?scope=${view.scope}&offset=${view.offset}&limit=100`);
  if(!target.isConnected||view!==contentRunView)return;
  target.innerHTML=`<p class="muted">共 ${result.total} 个文件 · ${view.scope==='inputs'?'输入快照引用':view.scope==='workspace'?'完整快照引用':'本节点自身输出'}，引用不会重复保存内容。</p><div class="content-plan-files">${result.files.map(v=>`<div><span>${esc(v.path)}</span><code title="${esc(v.sha256||'旧目录尚未建立 hash')}">${v.sha256?v.sha256.slice(0,12):'旧副本'} · ${size(v.size)}</code><a href="/api/projects/${view.project}/runs/${view.attempt}/files?scope=${view.scope}&path=${encodeURIComponent(v.path)}">下载</a></div>`).join('')||'<p class="muted">这个范围没有文件。</p>'}</div><div class="actions">${button('content-run-prev','上一页','',view.offset?'small':'small disabled')}${button('content-run-next','下一页','',view.offset+100<result.total?'small':'small disabled')}</div>`;
@@ -117,6 +125,14 @@ handleAction=async function(el){
  }
  if(action==='content-input-plan'){
   const job=await api(`/api/tasks/${id}/input-plan`,{});if(revision!==dialogRevision){toast('计划计算已加入后台');return;}await contentJob(job,async(result,target)=>{
+   if(state.runtime_features?.file_browser){
+    target.innerHTML=`<b>${result.unique_objects} 个唯一内容</b><p>文件引用 ${size(result.logical_bytes)} · 实际内容 ${size(result.unique_bytes)}</p><div class="content-plan-servers">${result.servers.map(s=>`<article><b>${esc(s.server_name)}</b><span>${s.error?esc(s.error):`只需上传 ${size(s.upload_bytes)} · ${s.missing_objects} 个缺失 hash`}</span></article>`).join('')}</div><div data-input-plan-browser></div>`;
+    return mountFileBrowser($('[data-input-plan-browser]',target),{
+     url:`/api/tasks/${encodeURIComponent(id)}/input-plan?`,columns:['名称','大小','SHA-256'],
+     summary:page=>`<p class="muted">共 ${page.total_count.toLocaleString()} 个路径 · 相同 hash 的内容只传一次</p>`,
+     row:(file,page)=>`<tr><td>${fileDisplayName(file.path,page)}</td><td>${size(file.size)}</td><td><code title="${esc(file.sha256)}">${esc(file.sha256.slice(0,16))}…</code></td></tr>`
+    });
+   }
    const value=await api(`/api/tasks/${id}/input-plan`);if(!target.isConnected)return;
    target.innerHTML=`<b>${Object.keys(value.files).length} 个路径 · ${value.unique_objects} 个唯一内容</b><p>文件引用 ${size(value.logical_bytes)} · 实际内容 ${size(value.unique_bytes)}</p><div class="content-plan-servers">${value.servers.map(s=>`<article><b>${esc(s.server_name)}</b><span>${s.error?esc(s.error):`只需上传 ${size(s.upload_bytes)} · ${s.missing_objects} 个缺失 hash`}</span></article>`).join('')}</div><div class="content-plan-files">${Object.entries(value.files).slice(0,200).map(([p,v])=>`<div><span>${esc(p)}</span><code title="${v.sha256}">${v.sha256.slice(0,12)} · ${size(v.size)}</code></div>`).join('')}</div><small>显示前 200 个路径。不同路径但相同 hash 的内容只传一次。</small>`;
   });return;
