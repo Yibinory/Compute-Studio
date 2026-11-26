@@ -155,6 +155,18 @@ def run_path(base,attempt):
     return run
 
 
+def upload_partial(base, spec, destination):
+    if spec.get('guard_work') and spec.get('attempt_id'):
+        folder=run_path(base,spec['attempt_id'])/'_incoming'
+        if folder.is_symlink():raise ValueError('上传目录含符号链接')
+        folder.mkdir(parents=True,exist_ok=True)
+    else:
+        folder=destination.parent
+    partial=folder/(destination.name+'.upload')
+    if partial.is_symlink():raise ValueError('临时文件含符号链接')
+    return partial
+
+
 def manifest_cached(base,path):
     if path.is_symlink():raise ValueError('清单目录含符号链接')
     files={}
@@ -211,11 +223,10 @@ def _dispatch(action,spec,base,status):
         return {'missing':missing,'available':available,'checked_at':time.time()}
     if action=='content_prepare':
         sha=spec['sha256'];dest=sha_path(base,sha);dest.parent.mkdir(parents=True,exist_ok=True)
-        partial=dest.with_name(sha+'.upload')
-        if partial.is_symlink():raise ValueError('临时文件含符号链接')
+        partial=upload_partial(base,spec,dest)
         return {'path':str(partial)}
     if action=='content_commit':
-        sha=spec['sha256'];dest=sha_path(base,sha);partial=dest.with_name(sha+'.upload')
+        sha=spec['sha256'];dest=sha_path(base,sha);partial=upload_partial(base,spec,dest)
         if partial.is_symlink() or file_hash(partial)!=sha or partial.stat().st_size!=spec['size']:raise ValueError('上传内容核验失败')
         with index(base) as db:
             os.replace(partial,dest)

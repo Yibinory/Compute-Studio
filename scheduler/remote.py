@@ -21,6 +21,7 @@ import paramiko
 from .files import confined, digest, manifest
 from .operations import OperationCanceled
 from .logs import tail_stream, chunk_stream
+from .workdirs import WorkDiskFull
 
 HOST_KEY_LOCK = threading.RLock()
 CALL_CONTEXT = threading.local()
@@ -299,6 +300,8 @@ class Remote:
             if transport is None or not transport.is_active():
                 self.connect()
             spec = {k:self.server.get(k,'') for k in ('work_root','data_root','conda_executable','benchmark_env')}
+            if self.server.get('extra_work_roots'):
+                spec.update(guard_work=True,expected_volume=self.server.get('expected_volume'))
             spec.update(payload or {})
             command = 'python3 '+shlex.quote(self.agent_root+'/agent.py')+' '+shlex.quote(action)
             stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
@@ -337,6 +340,8 @@ class Remote:
                 raise EOFError('远程通道关闭，未收到操作回执')
             raise RuntimeError('远程响应无效：'+(error or output)[-1500:])
         if not value.get('ok'):
+            if value.get('work_disk_full'):
+                raise WorkDiskFull(value['error'])
             raise RuntimeError(value.get('error','远程操作失败'))
         return value['result']
 
@@ -596,8 +601,9 @@ class Remote:
         missing=report['missing'];total=sum(unique[h]['size'] for h in missing);done=0
         capacity=self.call('probe')
         mutable=sum(v['size'] for p,v in inventory.items() if not p.startswith('deps/'))+sum(v['size'] for v in (public or {}).values())
-        if capacity['work_free_gb']*1024**3<total+2*mutable+self.server.get('min_disk_gb',5)*1024**3:
-            raise ValueError('工作目录空间不足：新增缓存与独立代码工作区需要额外空间')
+        required=(total+2*mutable)/1024**3+self.server.get('min_disk_gb',5)
+        if capacity['work_free_gb']<required:
+            raise WorkDiskFull('工作目录空间不足：新增缓存与独立代码工作区需要额外空间',required)
         if progress:progress(0,total,len(unique)-len(missing),len(unique))
         context=self.log_channel() if getattr(self,'client',None) else nullcontext(self.sftp)
         with context as channel:
@@ -607,7 +613,15 @@ class Remote:
                 def callback(amount,length):
                     if check:check()
                     if progress:progress(done+amount,total,len(unique)-len(missing),len(unique))
-                channel.put(str(pool.path(sha)),dest,callback=callback)
+                try:
+                    channel.put(str(pool.path(sha)),dest,callback=callback)
+                except OSError as exc:
+                    if self.server.get('extra_work_roots') and (
+                        exc.errno in (28,122) or 'no space left' in str(exc).lower() or
+                        str(exc).lower()=='failure' and self.call('probe')['work_free_gb'] < self.server.get('min_disk_gb',5)
+                    ):
+                        raise WorkDiskFull('上传至工作目录时磁盘空间不足') from exc
+                    raise
                 if progress:progress(done+item['size'],total,len(unique)-len(missing),len(unique),'verifying')
                 self.cancellable_call('content_commit',{**spec,'sha256':sha,'size':item['size']},check=check,timeout=86400)
                 done+=item['size']

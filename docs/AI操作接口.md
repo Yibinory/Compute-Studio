@@ -180,6 +180,16 @@ for dataset in client.json("/api/state")["datasets"]:
 
 传输详情中的哈希和时间表示该次作业的实际观测。同一文件在多台服务器核验通过时，接口仍分别返回各服务器的记录。需要确认现在的文件内容时，发起新的 `verify` 作业。数据结构与维护流程见[项目架构与存储](./项目架构与存储.md)。
 
+### 服务器工作目录与换盘重跑
+
+`GET /api/state` 的 `runtime_features.multiple_work_roots` 表示控制器支持多工作目录。调用 `POST /api/servers` 编辑服务器时传原服务器 `id`，保留主目录 `work_root`，用 `extra_work_roots` 传附加目录字符串数组，例如 `["/mnt/ssd2/compute-work"]`。省略该字段会保留已有设置。连接或目录修改沿用活动实验保护。
+
+服务器的 `work_locations` 给出各目录的 `id` 和 `path`。`snapshot.work_volumes` 按配置路径返回文件系统标识、可用字节、总字节、已用字节或采样错误。`work_capacity` 是该服务器按文件系统去重的工作盘合计，含 `free_bytes`、`total_bytes`、`used_bytes`、每块盘的 `disks[].paths` 及未计入的 `unavailable` 目录。尚无采样的合计为 `null`。单次运行可用空间请查其实际目录。数据盘容量单独见 `snapshot.data_disk`。
+
+项目的 `preferred_work_roots[服务器ID]` 给出调度实际使用的优先路径。原有服务器从单目录改为多目录时，已有项目默认沿用原目录，已选定其他有效目录的项目保留其选择。新项目在多目录服务器首次选盘前没有该项。GPU 分配、实验的 `server_ids` 和数据集接口继续使用物理服务器 ID。核验、查看或清理指定工作副本时，使用相应的 `work_locations[].id` 作为副本接口的 `server_id`，清理前先预览实际作用目录。
+
+每次运行的 `work_root` 记录实际工作目录。换盘重跑会产生新的 `attempt_id`，原运行记入 `previous_attempts`，其中保存原目录和 `disk_failure` 原因。按新运行的回传记录整理结果。
+
 ### 按目录浏览文件清单
 
 项目文件索引、数据集文件、运行文件、实验产物、服务器副本和传输详细记录均支持 `directory` 查询参数。传入空字符串打开根目录，传入 `train/images` 打开对应的相对目录。省略 `directory` 时沿用原接口的返回格式。

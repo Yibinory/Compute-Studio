@@ -85,7 +85,16 @@ function logView(id){if(logReader?.id!==id){logReader?.controller?.abort();logRe
 function logPageSkeleton(view){const t=state.tasks.find(t=>t.id===view.id),attempts=[...(t?.attempt_id?[{attempt_id:t.attempt_id,exit_code:t.exit_code}]:[]),...(t?.previous_attempts||[]).slice().reverse()];return pageHead(t?'#'+t.seq+' '+t.name+' · 日志':'实验日志','stdout / stderr；默认预览最近 200 行，完整日志分页读取。',t?`<a href="#project/${t.project_id}">← 返回项目</a>`:'')+`<section class="card"><div class="log-reader-controls"><label>运行记录<select id="log-attempt-select"><option value="">最新运行（自动跟随）</option>${attempts.map(a=>`<option value="${esc(a.attempt_id)}">${esc(a.attempt_id.slice(0,8))} · 退出码 ${a.exit_code??'—'}</option>`).join('')}</select></label><div class="tabs">${button('log-mode','最新 200 行','data-mode="tail"',view.mode==='tail'?'active':'')}${button('log-mode','完整日志','data-mode="full"',view.mode==='full'?'active':'')}</div><div class="actions">${button('log-reader-refresh','刷新','','small')}<a id="log-download" class="download-button" href="/api/tasks/${view.id}/log/download">下载完整日志</a></div></div><p id="log-reader-meta" class="muted">正在读取日志…</p><div id="log-task-status" class="log-task-status"></div><pre id="full-task-log" class="log log-reader">正在读取日志…</pre><div id="log-reader-pagination" class="detail-pagination"></div><p class="muted">最近 200 行自动轮询。完整日志每次最多读取 128 KB，分页浏览和下载可覆盖整个文件；不会一次把大日志塞进网页。</p></section>`;}
 function updateLogReader(view){
   if(route()[0]!=='logs'||logReader!==view)return;const pre=$('#full-task-log'),data=view.data;
-  const task=state.tasks.find(t=>t.id===view.id),historical=task?.previous_attempts?.find(a=>a.attempt_id===(view.attempt||view.data?.attempt_id)&&a.attempt_id!==task.attempt_id),run=historical||task;if(run&&$('#log-task-status'))$('#log-task-status').innerHTML=`${historical?'<span class="tag">历史运行</span>':badge(task.status)}<span>退出码 ${run.exit_code??'—'}</span><span>${esc(serverBy(run.server_id)?.name||'尚未分配服务器')}</span>${!historical&&task.reason?`<span class="error-text">${esc(task.reason)}</span>`:''}`;
+  const task=state.tasks.find(t=>t.id===view.id);
+  const historical=task?.previous_attempts?.find(a=>a.attempt_id===(view.attempt||view.data?.attempt_id)&&a.attempt_id!==task.attempt_id);
+  const run=historical||task, status=$('#log-task-status');
+  if(run&&status){
+    const reason=historical?historical.disk_failure:task.reason;
+    status.innerHTML=`${historical?'<span class="tag">历史运行</span>':badge(task.status)}<span>退出码 ${run.exit_code??'—'}</span>
+      <span>${esc(serverBy(run.server_id)?.name||'尚未分配服务器')}</span>
+      ${run.work_root?`<code class="break">${esc(run.work_root)}</code>`:''}
+      ${reason?`<span class="error-text">${esc(reason)}</span>`:''}`;
+  }
   if(view.error){pre.textContent=view.error;return;}if(view.pending){$('#log-reader-meta').textContent='服务器日志正在读取，稍后自动更新…';document.querySelectorAll('[data-action=log-prev],[data-action=log-next]').forEach(b=>b.disabled=true);return;}if(!data)return;
   const bottom=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-35,old=pre.scrollTop,changedPage=pre.dataset.offset!==String(data.offset??'tail')||pre.dataset.attempt!==String(data.attempt_id);
   if(pre.textContent!==(data.text||'尚无日志'))pre.textContent=data.text||'尚无日志';pre.scrollTop=changedPage?view.mode==='tail'?pre.scrollHeight:0:bottom&&view.mode==='tail'?pre.scrollHeight:old;pre.dataset.offset=String(data.offset??'tail');pre.dataset.attempt=String(data.attempt_id);

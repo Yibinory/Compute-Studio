@@ -120,6 +120,50 @@ def test_storage_markers_and_resource_disks(agent,tmp_path,monkeypatch):
         assert 0<=value[key]['used_percent']<=100
 
 
+def test_multiple_work_mounts_and_disk_error_attribution(agent,tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    work=tmp_path/'work'
+    work.mkdir()
+    missing=tmp_path/'offline'
+    log=tmp_path/'log'
+    sample=SimpleNamespace(f_fsid=31,f_bavail=200,f_files=1000,f_favail=500,
+                           f_frsize=4096,f_blocks=1000,f_bfree=240)
+    monkeypatch.setattr(agent.os,'statvfs',lambda path:sample,raising=False)
+    monkeypatch.setattr(agent.probe,'status',lambda:{'gpus':[]})
+    request={'work_root':str(missing),'data_root':str(tmp_path/'data'),
+             'work_paths':[str(missing),str(work)],'volume_ids':{str(work):'31'}}
+    volumes=agent.dispatch('probe',request)['work_volumes']
+    assert 'error' in volumes[str(missing)] and not missing.exists()
+    assert volumes[str(work)]['device']=='31' and volumes[str(work)]['free_gb']>=0
+    assert volumes[str(work)]['total_bytes']==1000*4096
+    assert volumes[str(work)]['used_bytes']==760*4096
+    assert volumes[str(work)]['free_bytes']==200*4096
+    with pytest.raises(ValueError,match='文件系统已改变'):
+        agent.work_volume(str(work),'old-volume')
+    log.write_text("OSError: [Errno 28] No space left on device: 'checkpoints/epoch.bin'")
+    assert agent.disk_failure_in_log(work,log)
+    log.write_text("OSError: [Errno 28] No space left on device: '/tmp/unrelated-output'")
+    assert not agent.disk_failure_in_log(work,log)
+    log.write_text('CUDA out of memory')
+    assert not agent.disk_failure_in_log(work,log)
+    assert not agent.work_exhausted(work)
+    sample.f_bavail=0
+    assert agent.work_exhausted(work)
+
+
+def test_disk_failover_discards_only_own_partial_upload(agent,tmp_path,monkeypatch):
+    monkeypatch.setattr(agent,'work_volume',lambda *args:{'device':'disk','free_gb':5})
+    spec={'work_root':str(tmp_path/'work'),'project_id':'a'*32,'attempt_id':'b'*32,'guard_work':True,'sha256':'c'*64}
+    peer={**spec,'attempt_id':'d'*32}
+    partial=Path(agent.dispatch('content_prepare',spec)['path'])
+    other=Path(agent.dispatch('content_prepare',peer)['path'])
+    partial.write_bytes(b'partial')
+    other.write_bytes(b'peer')
+    assert partial!=other
+    agent.dispatch('discard_unstarted_workspace',spec)
+    assert not partial.exists() and other.read_bytes()==b'peer'
+
+
 def test_benchmark_binds_physical_uuid(agent,monkeypatch):
     import os
     monkeypatch.setenv('CUDA_VISIBLE_DEVICES','old-mask')

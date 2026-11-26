@@ -20,7 +20,7 @@ def cleanup_failed_workspaces(engine,job=None):
         spec={'project_id':pid,'attempt_id':attempt}
         engine.progress(job,phase='cleanup',label='清理已结束的失败运行工作副本，保留日志与共享内容',files_done=i,files_total=len(candidates))
         try:
-            remote=engine.remote(engine.store.get('servers',row['server_id']))
+            remote=engine.run_remote(engine.store.get('servers',row['server_id']),row)
             state=remote.call('status',spec)
             if state['state']!='finished' or not (state.get('interrupted') or isinstance(state.get('exit_code'),int) and state['exit_code']!=0):
                 results.append({'attempt_id':attempt,'skipped':True,'reason':'远程未确认失败结束'});continue
@@ -83,7 +83,7 @@ def recover(engine,task,remote):
         if reason or latest.get('archived'):
             latest.update(status='canceled' if canceled else 'paused' if paused else 'failed',finished_at=time.time(),reason='服务器重启中断；日志已保留、失败工作副本已清理；'+reason)
         else:
-            history={'attempt_id':attempt,'server_id':latest.get('server_id'),'exit_code':None,'synced_at':None,
+            history={'attempt_id':attempt,'server_id':latest.get('server_id'),'work_root':latest.get('work_root'),'exit_code':None,'synced_at':None,
                      'interrupted':True,'interruption_cause':proof.get('interruption_cause','server_reboot'),
                      'logs_saved_at':time.time(),'workspace_cleanup':cleanup,
                      'resolved_conda_env':latest.get('resolved_conda_env'),'conda_env_source':latest.get('conda_env_source')}

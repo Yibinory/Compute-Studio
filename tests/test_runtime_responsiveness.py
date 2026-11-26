@@ -109,3 +109,23 @@ def test_controller_restart_recovers_preparation_without_duplicate_launch(engine
         assert value['attempt_id']==attempt
         assert len(FakeRemote.launches)==launches and value['command']==t['command']
     finally:other.close()
+def test_recovery_visits_newer_runs_when_older_runs_fill_worker_pool(engine,setup_project,monkeypatch):
+    project,_=setup_project
+    ids=[]
+    for index in range(12):
+        task=engine.create_task(project['id'],{'name':'run'+str(index),'command':'python train.py'})
+        task.update(status='lost' if index<9 else 'running')
+        if index==0:task['recovery_check_after']=time.time()+300
+        engine.store.put('tasks',task)
+        ids.append(task['id'])
+    seen=[]
+    def pending(task,callback):
+        seen.append(task['id'])
+        engine.runtime_pending[task['id']]={}
+    monkeypatch.setattr(engine,'submit_runtime',pending)
+    engine.background_runtime=True
+    engine.recover()
+    assert seen==ids[1:9]
+    engine.runtime_pending.clear()
+    engine.recover()
+    assert seen[8:11]==ids[9:] and ids[0] not in seen

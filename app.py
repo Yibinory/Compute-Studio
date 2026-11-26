@@ -35,6 +35,7 @@ from scheduler.uploads import Uploads, CHUNK_SIZE, BUSY
 from scheduler.local_storage import LocalStorage, saved_root, root_lock
 from scheduler.logs import read_local, CHUNK_BYTES
 from scheduler.updates import Updates, workspace_busy
+from scheduler.workdirs import roots, endpoint_id, capacity, preferred_root
 from studio_launch import INSTALL_ROOT, PROGRAM_ROOT, WORKSPACE_BUSY, WORKSPACE_LOCKED
 from studio_launch import launch_selected, mark_running, program_version, update_state
 from flask import Request
@@ -161,8 +162,13 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
     def state():
         servers=engine.store.all('servers')
         for server in servers:
+            server['work_locations']=[{'id':endpoint_id(server,p),'path':p} for p in roots(server)]
+            server['work_capacity']=capacity(server)
             server.pop('history',None)
             server['conda']=engine.current_conda(server)
+        projects=engine.store.all('projects')
+        for project in projects:
+            project['preferred_work_roots']={s['id']:path for s in servers if (path:=preferred_root(project,s))}
         tasks=engine.store.summaries('tasks')
         datasets=engine.store.summaries('datasets')
         dataset_notes={n['id']:n for n in engine.store.summaries('dataset_notes')}
@@ -171,7 +177,7 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
         active_uploads=BUSY
         visible_uploads=[uploads.public(u) for i,u in enumerate(all_uploads) if i>=len(all_uploads)-100 or u['status'] in active_uploads]
         visible_jobs=[public_job(j) for j in all_jobs]
-        return jsonify(runtime_features={'async_runtime':True,'task_environments':True,'content_store':True,'batch_states':True,'batch_queue':True,'import_configuration':True,'project_archive':True,'task_archive':True,'result_tables':True,'result_dataset_tables':True,'named_result_tables':True,'dataset_notes':True,'code_sync':True,'file_browser':True},code_sources=engine.store.all('code_sources'),servers=servers,projects=engine.store.all('projects'),tasks=tasks,notes=engine.store.summaries('notes'),storage=[engine.current_sharing(scope) for scope in ('work','data')],local_storage=local_storage.info(),uploads=visible_uploads,datasets=datasets,replicas=engine.store.summaries('replicas'),jobs=visible_jobs,settings=engine.settings,events=engine.store.events())
+        return jsonify(runtime_features={'multiple_work_roots':True,'async_runtime':True,'task_environments':True,'content_store':True,'batch_states':True,'batch_queue':True,'import_configuration':True,'project_archive':True,'task_archive':True,'result_tables':True,'result_dataset_tables':True,'named_result_tables':True,'dataset_notes':True,'code_sync':True,'file_browser':True},code_sources=engine.store.all('code_sources'),servers=servers,projects=projects,tasks=tasks,notes=engine.store.summaries('notes'),storage=[engine.current_sharing(scope) for scope in ('work','data')],local_storage=local_storage.info(),uploads=visible_uploads,datasets=datasets,replicas=engine.store.summaries('replicas'),jobs=visible_jobs,settings=engine.settings,events=engine.store.events())
 
     @app.get('/api/experiment-guide')
     def experiment_guide():
@@ -406,7 +412,7 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
                     server=engine.store.get('servers',key)
                     server.update(connected=not error,error=error or '')
                     if snapshot:
-                        server['snapshot']=snapshot
+                        engine.save_work_sample(server,snapshot)
                     engine.store.put('servers',server)
                 if error:
                     raise ValueError(error)
@@ -720,12 +726,12 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
     def content_compact(project_id):
         engine.store.get('projects',project_id);data=request.get_json() or {};ids=data.get('server_ids',[])
         if not isinstance(ids,list):raise ValueError('服务器须为列表')
-        for sid in ids:engine.store.get('servers',sid)
+        for sid in ids:engine.work_location(sid)
         return jsonify(engine.enqueue('整理项目历史重复文件',engine.compact_content,project_id,ids)),202
 
     @app.post('/api/projects/<project_id>/storage/scan')
     def content_scan(project_id):
-        engine.store.get('projects',project_id);data=request.get_json() or {};sid=data.get('server_id');engine.store.get('servers',sid)
+        engine.store.get('projects',project_id);data=request.get_json() or {};sid=data.get('server_id');engine.work_location(sid)
         return jsonify(engine.enqueue('核验服务器内容索引',engine.scan_content_cache,project_id,sid)),202
 
     @app.post('/api/tasks/<task_id>/input-plan')
@@ -916,7 +922,7 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
                 value=read_local(local,mode,offset,limit)
             else:
                 server=engine.store.get('servers',record['server_id'])
-                try:value=engine.remote(server).read_log({'project_id':task['project_id'],'attempt_id':attempt},mode,offset,limit)
+                try:value=engine.run_remote(server,record).read_log({'project_id':task['project_id'],'attempt_id':attempt},mode,offset,limit)
                 except (OSError,EOFError,paramiko.SSHException) as exc:
                     if not local.is_file():raise
                     value=read_local(local,mode,offset,limit);value['warning']='服务器日志暂不可读，显示已回传版本：'+str(exc)
@@ -935,7 +941,7 @@ def create_app(root=None, start=False, remote_factory=None, config_path=None, ru
         if engine.settings.get('demo'):return Response('[演示日志] 尚无真实运行日志。',content_type='text/plain; charset=utf-8')
         filename='run-'+attempt+'.log'
         if local.is_file() and not current:return send_file(local,as_attachment=True,download_name=filename)
-        server=engine.store.get('servers',record['server_id']);remote=engine.remote(server)
+        server=engine.store.get('servers',record['server_id']);remote=engine.run_remote(server,record)
         metadata=remote.read_log({'project_id':task['project_id'],'attempt_id':attempt},'full',0,1)
         if not metadata.get('exists',True):raise ValueError('运行日志尚未生成')
         return Response(stream_with_context(remote.stream_log({'project_id':task['project_id'],'attempt_id':attempt})),content_type='application/octet-stream',headers={'Content-Disposition':'attachment; filename="'+filename+'"'})

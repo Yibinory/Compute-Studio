@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import math
+from .workdirs import available
 
 ACTIVE = {'staging', 'launching', 'running', 'suspended', 'canceling', 'syncing', 'sync_failed', 'lost'}
 
@@ -46,7 +47,7 @@ def choose(task, servers, tasks, settings):
         snap = server.get('snapshot', {})
         if now - snap.get('sampled_at', 0) > settings.get('stale_seconds', 30):
             continue
-        if snap.get('work_free_gb', 0) < server.get('min_disk_gb', 5):
+        if not available(task,server):
             continue
         for gpu in snap.get('gpus', []):
             key = gpu.get('uuid') or str(gpu['index'])

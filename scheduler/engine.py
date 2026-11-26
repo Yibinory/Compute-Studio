@@ -19,6 +19,7 @@ from .operations import OperationCanceled, measured
 from .environments import environment, signature as conda_signature, resolve as resolve_environment
 from .transfer_journal import TransferJournal
 from .file_process import run as file_process
+from . import workdirs
 
 DEFAULTS = {'id':'global', 'paused':False, 'poll_seconds':5, 'history_samples':6, 'stale_seconds':30, 'zero_memory_reservation_mb':1024, 'cleanup_check_seconds':3600,'content_store_enabled':True,'cache_scan_hours':24,'auto_requeue_interrupted':True,'interruption_retry_limit':2,'interruption_retry_delay':30}
 
@@ -40,6 +41,7 @@ class Engine:
         self.pollers = ThreadPoolExecutor(max_workers=8, thread_name_prefix='monitor')
         self.runtime_workers = ThreadPoolExecutor(max_workers=8, thread_name_prefix='experiment-runtime')
         self.runtime_pending = {}
+        self.recovery_cursor = None
         self.probe_pending = {}
         self.probe_started = {}
         self.probe_configs = {}
@@ -63,6 +65,10 @@ class Engine:
         from .source_sync import CodeSources
         self.code_sources=CodeSources(self)
         for server in self.store.all('servers'):
+            # Earlier multi-root versions did not record when the old single root
+            # became optional. Treat projects present at upgrade as existing.
+            if server.get('extra_work_roots') and 'existing_project_root' not in server:
+                server['existing_project_root'] = {'path':server['work_root'], 'through':time.time()}
             server.update(connected=False, history={})
             self.store.put('servers', server)
         # Keep existing verified groups on upgrade; future connection changes
@@ -71,7 +77,7 @@ class Engine:
             scope=value.get('scope')
             if scope not in ('work','data'):
                 continue
-            current=configuration(self.store.all('servers'),scope)
+            current=configuration(self.storage_servers(scope),scope)
             previous=value.get('configuration')
             if previous=={sid:fields[:4] for sid,fields in current.items()}:
                 value['configuration']=current
@@ -205,10 +211,31 @@ class Engine:
 
     def remote(self, server):
         key = server['id']
+        host_id = server.get('host_id',key)
         with self.remote_lock:
             if key not in self.remotes:
-                self.remotes[key] = self.remote_factory(server.copy(), self.root, self.passwords.get(key))
+                self.remotes[key] = self.remote_factory({**server,'id':host_id}, self.root, self.passwords.get(host_id))
+            if server.get('extra_work_roots'):
+                self.remotes[key].server['expected_volume'] = server.get('volume_ids',{}).get(server['work_root'])
             return self.remotes[key]
+
+    def work_locations(self):
+        return workdirs.endpoints(self.store.all('servers'))
+
+    def work_location(self, key):
+        if not isinstance(key,str):raise ValueError('请选择服务器工作目录')
+        if '~' not in key:
+            return self.store.get('servers',key)
+        try:return self.work_locations()[key]
+        except KeyError:raise ValueError('服务器工作目录不存在') from None
+
+    def run_remote(self, server, record):
+        path = record.get('work_root') or server['work_root']
+        key = workdirs.endpoint_id(server,path)
+        return self.remote({**server,'id':key,'host_id':server['id'],'work_root':path})
+
+    def storage_servers(self, scope):
+        return list(self.work_locations().values()) if scope=='work' else self.store.all('servers')
 
     def save_server(self, data):
         with self.lock:
@@ -226,6 +253,15 @@ class Engine:
                 if not (path.startswith('/') or path.startswith('~/')) or '..' in path.split('/') or path.rstrip('/') in ('','/','/home','/tmp','/usr','/etc','/root','/var'):
                     raise ValueError('运行和数据目录必须是具体的 Linux 绝对目录或 ~/ 子目录')
             server['name'] = server['name'] or server['host']
+            server['extra_work_roots'] = workdirs.validate_extra(data.get('extra_work_roots',old.get('extra_work_roots',[])),server['work_root'])
+            if old.get('extra_work_roots') or server['extra_work_roots']:
+                retired = set(workdirs.roots(old))-set(workdirs.roots(server)) if old else set()
+                if old and old['work_root']!=server['work_root']:
+                    retired.add(old['work_root'])
+                used={workdirs.endpoint_id(old,p) for p in retired}
+                if used and any(r['server_id'] in used and r.get('exists') for r in self.store.summaries('replicas')):
+                    raise ValueError('修改工作目录前请先清理该目录内已登记的项目副本')
+            server['volume_ids']={p:v for p,v in old.get('volume_ids',{}).items() if p in workdirs.roots(server)}
             server['port'] = int(data.get('port',old.get('port',22)))
             if not 1 <= server['port'] <= 65535:
                 raise ValueError('端口范围为 1–65535')
@@ -237,6 +273,7 @@ class Engine:
             server.setdefault('benchmarks',{})
             connection_fields = ('host','port','username','identity_file','proxy_jump','work_root','data_root','trust_new_host','conda_executable','benchmark_env')
             changed = any(old.get(f) != server[f] for f in connection_fields)
+            changed = changed or old.get('extra_work_roots',[])!=server['extra_work_roots']
             if changed and any(t['status'] in ACTIVE and t.get('server_id')==key for t in self.store.all('tasks')):
                 raise ValueError('服务器有运行或尚未回传的任务，不能修改连接和目录')
             secret = data.get('password')
@@ -250,9 +287,17 @@ class Engine:
                         raise ValueError('系统密钥环不可用；取消“记住密码”后可使用当前会话凭证') from exc
                 changed = True
             if changed:
-                if key in self.remotes:
-                    self.remotes.pop(key).close()
+                with self.remote_lock:
+                    for endpoint in list(self.remotes):
+                        if endpoint==key or endpoint.startswith(key+'~'):
+                            self.remotes.pop(endpoint).close()
                 server.update(connected=False, history={}, error='等待连接')
+            if server['extra_work_roots'] and not old.get('extra_work_roots'):
+                # A new multi-disk host has no previous project location.
+                prior = old.get('work_root')
+                server['existing_project_root'] = (
+                    {'path':prior if prior in workdirs.roots(server) else server['work_root'], 'through':time.time()}
+                    if old else None)
             self.store.put('servers',server)
             self.store.event('保存服务器：'+server['name'])
             return server
@@ -287,7 +332,7 @@ class Engine:
             return project
 
     def project_environments(self,project_id,data):
-        with self.lock:
+        with self.lock,self.store.lock:
             project=self.store.get('projects',project_id)
             mapping=data.get('server_conda_envs',{})
             if not isinstance(mapping,dict):raise ValueError('项目环境配置必须按服务器保存')
@@ -429,9 +474,9 @@ class Engine:
                 if task['status']=='success' and action!='retry':
                     raise ValueError('已成功任务请使用重试操作')
                 if task.get('attempt_id'):
-                    task['previous_attempts']=task.get('previous_attempts',[])+[{'attempt_id':task['attempt_id'],'server_id':task.get('server_id'),'exit_code':task.get('exit_code'),'synced_at':task.get('synced_at'),'resolved_conda_env':task.get('resolved_conda_env'),'conda_env_source':task.get('conda_env_source')}]
+                    task['previous_attempts']=task.get('previous_attempts',[])+[{'attempt_id':task['attempt_id'],'server_id':task.get('server_id'),'work_root':task.get('work_root'),'exit_code':task.get('exit_code'),'synced_at':task.get('synced_at'),'resolved_conda_env':task.get('resolved_conda_env'),'conda_env_source':task.get('conda_env_source')}]
                 task.update(status='queued', reason='', synced_at=None, server_id=None, attempt_id=None, cancel_requested=False, canceled=False, attempts=0,interruption_retries=0)
-                for field in ('interruption','workspace_cleanup','recovery_check_after','interruption_was_suspended'):task.pop(field,None)
+                for field in ('disk_failure','disk_retry_server','disk_exclusions','disk_retry_thresholds','disk_failed_launches','work_root','interruption','workspace_cleanup','recovery_check_after','interruption_was_suspended'):task.pop(field,None)
                 task.pop('resolved_conda_env',None);task.pop('conda_env_source',None)
                 for field in ('control_request','control_request_id','control_requested_at','paused_at'):task.pop(field,None)
                 task.update(exit_code=None,gpu_uuid=None,gpu_index=None,started_at=None,finished_at=None,remote_state={})
@@ -493,7 +538,7 @@ class Engine:
         latest=self.store.get('tasks',task_id)
         if latest.get('control_request_id')!=request_id or latest.get('attempt_id')!=task.get('attempt_id'):return latest
         server=self.store.get('servers',task['server_id'])
-        try:result=self.remote(server).call(action,self.spec(task),timeout=30)
+        try:result=self.run_remote(server,task).call(action,self.spec(task),timeout=30)
         except Exception as exc:
             with self.store.lock:
                 latest=self.store.get('tasks',task_id)
@@ -548,9 +593,24 @@ class Engine:
             if latest.get('archived') or latest['status'] not in ('draft','queued','waiting','blocked'):raise ValueError('实验状态已改变或已归档，不能启动')
             latest.update(status='staging',server_id=server['id'],gpu_uuid=gpu.get('uuid') or str(gpu['index']),
                           gpu_index=gpu['index'],gpu_name_assigned=gpu.get('name',''),attempt_id=uid(),preparation_started_at=time.time(),reason='准备实验输入')
+            if server.get('extra_work_roots'):
+                preference=workdirs.preferred_root(self.store.get('projects',task['project_id']),server)
+                candidates=workdirs.available(latest,server,preference)
+                if not candidates:raise ValueError('等待可用工作目录')
+                latest['work_root']=candidates[0]
+                if not preference:self.remember_work_root(latest)
+            else:latest['work_root']=server['work_root']
             for field in ('input_manifest','result_manifest','runtime_progress','preparation_retry_at'):latest.pop(field,None)
             self.store.put('tasks',latest)
             return latest
+
+    def remember_work_root(self,task):
+        with self.store.lock:
+            project=self.store.get('projects',task['project_id'])
+            preferences=project.setdefault('preferred_work_roots',{})
+            if preferences.get(task['server_id'])!=task['work_root']:
+                preferences[task['server_id']]=task['work_root']
+                self.store.put('projects',project)
 
     def submit_runtime(self,task,function,*args):
         with self.store.lock:
@@ -574,6 +634,11 @@ class Engine:
         attempt=task['attempt_id']
         try:self.launch(task,server,gpu,resume=resume)
         except Exception as exc:
+            if isinstance(exc,workdirs.WorkDiskFull) and server.get('extra_work_roots'):
+                latest=self.store.get('tasks',task['id'])
+                if latest.get('attempt_id')==attempt and latest['status'] in ('staging','launching'):
+                    self.disk_failure(latest,server,str(exc),preparing=True,required=exc.required_gb)
+                return
             with self.store.lock:
                 latest=self.store.get('tasks',task['id'])
                 if latest.get('attempt_id')!=attempt:return
@@ -587,21 +652,87 @@ class Engine:
                 self.store.put('tasks',latest)
             self.store.event('任务 '+task['name']+'：'+str(exc),'error')
 
+    def disk_failure(self,task,server,reason,preparing=False,required=None):
+        counted=not preparing or task['status']=='launching'
+        task.update(disk_failure={'reason':reason,'preparing':preparing,'required_gb':required,'counted_launch':counted},status='syncing',
+                    reason='工作盘空间不足，正在保存记录并核实旧运行')
+        self.put_runtime_task(task)
+        self.finish_disk_failure(task,server)
+
+    def finish_disk_failure(self,task,server):
+        """Persist the pending step first. Cleanup and restart are safe to replay."""
+        from .content import Content
+        remote=self.run_remote(server,task)
+        spec=self.spec(task)
+        attempt=spec['attempt_id']
+        location=task['work_root']
+        failure=task['disk_failure']
+        try:
+            pool=Content(self,task['project_id'])
+            catalog=pool.read_catalog(attempt)
+            if catalog.get('inputs') is None:
+                raise ValueError('缺少原输入快照，不能安全换盘重跑')
+            if failure['preparing']:
+                cleanup=remote.call('discard_unstarted_workspace',spec,timeout=600)
+            else:
+                remote.download(pool.return_destination(attempt,'control'),{**spec,'disk_recovery_logs':True},'runs/'+attempt+'/_control')
+                cleanup=remote.call('discard_failed_workspace',spec,timeout=600)
+            pool.save_catalog(attempt,workspace_cleanup=cleanup,disk_failure=failure)
+            free=remote.call('probe')['work_free_gb']
+            with self.store.lock:
+                latest=self.store.get('tasks',task['id'])
+                if latest.get('attempt_id')!=attempt:return
+                exclusions=latest.setdefault('disk_exclusions',{})
+                exclusions[location]=server.get('volume_ids',{}).get(location)
+                # Ignore the space reclaimed by this cleanup; wait for additional headroom.
+                latest.setdefault('disk_retry_thresholds',{})[location]={
+                    'free_gb':max(free+1, failure.get('required_gb') or 0, server.get('min_disk_gb',5)),
+                    'checked_at':time.time()}
+                history={k:latest.get(k) for k in ('attempt_id','server_id','work_root','exit_code','resolved_conda_env','conda_env_source')}
+                history.update(disk_failure=failure['reason'],workspace_cleanup=cleanup)
+                latest.setdefault('previous_attempts',[]).append(history)
+                if failure.get('counted_launch'):
+                    latest['disk_failed_launches']=latest.get('disk_failed_launches',0)+1
+                canceled=latest.get('cancel_requested') or latest.get('canceled')
+                latest.update(status='canceled' if canceled else 'waiting',
+                              reason='用户中断实验' if canceled else '工作盘空间不足，等待在其他工作盘从头重跑',
+                              retry_snapshot_attempt=attempt,disk_retry_server=server['id'],
+                              attempt_id=None,server_id=None,synced_at=None,remote_state={})
+                for field in ('work_root','disk_failure','sync_last_error','sync_retry_at','runtime_progress','exit_code','result_manifest'):
+                    latest.pop(field,None)
+                self.store.put('tasks',latest)
+            self.store.event('工作盘空间不足：'+task['name']+' · '+location+' · '+latest['reason'])
+            self.wake_event.set()
+        except Exception as exc:
+            task.update(status='sync_failed',sync_retry_at=time.time(),reason='换盘前处理失败，保留原运行并重试：'+str(exc))
+            self.put_runtime_task(task)
+
     def spec(self, task):
         return {'project_id':task['project_id'], 'attempt_id':task['attempt_id']}
 
     def poll_one(self, server):
         try:
-            snapshot = self.remote(server).call('probe')
+            snapshot = self.probe_server(server)
             snapshot['remote_sampled_at']=snapshot.get('sampled_at')
             snapshot['sampled_at']=time.time()
             return server['id'], snapshot, None
         except Exception as exc:
             return server['id'], None, str(exc)
 
+    def probe_server(self,server):
+        if not server.get('extra_work_roots'):return self.remote(server).call('probe')
+        return self.remote(server).call('probe',{'work_paths':workdirs.roots(server),'volume_ids':server.get('volume_ids',{})})
+
+    @staticmethod
+    def save_work_sample(server,snapshot):
+        for path,sample in snapshot.get('work_volumes',{}).items():
+            if sample.get('device'):
+                server.setdefault('volume_ids',{}).setdefault(path,sample['device'])
+        server['snapshot']=snapshot
+
     @staticmethod
     def probe_configuration(server):
-        return [server.get(k) for k in ('host','port','username','identity_file','proxy_jump','trust_new_host','credential_revision','work_root','data_root')]
+        return [server.get(k) for k in ('host','port','username','identity_file','proxy_jump','trust_new_host','credential_revision','work_root','data_root','extra_work_roots')]
 
     def tick(self):
         if self.storage_moving or self.stop_event.is_set():return
@@ -621,7 +752,8 @@ class Engine:
                 if self.probe_configuration(server)!=configuration:continue
                 server.update(connected=not error,error=error or '')
                 if snapshot:
-                    server['snapshot']=snapshot;history=server.setdefault('history',{})
+                    self.save_work_sample(server,snapshot)
+                    history=server.setdefault('history',{})
                     for gpu in snapshot.get('gpus',[]):
                         gkey=gpu.get('uuid') or str(gpu['index'])
                         history[gkey]=(history.get(gkey,[])+[gpu])[-self.settings['history_samples']:]
@@ -655,7 +787,7 @@ class Engine:
                                 reserved=self.reserve_task(task,*assignment)
                                 task=reserved
                                 if self.background_runtime:self.submit_runtime(reserved,self.launch_reserved,*assignment)
-                            else:task.update(status='waiting',reason='等待符合显存、利用率、服务器范围和磁盘门槛的 GPU')
+                            else:task.update(status='waiting',reason='等待可用工作目录；可释放空间后重新排队或添加工作盘' if task.get('disk_exclusions') else '等待符合显存、利用率、服务器范围和磁盘门槛的 GPU')
                     if task['status'] in ('queued','waiting','blocked') and previous!=(task['status'],task.get('reason')):self.store.put('tasks',task)
                 if 'reserved' in locals():
                     if not self.background_runtime:self.launch_reserved(reserved,*assignment)
@@ -679,7 +811,7 @@ class Engine:
         if task.get('status')!='staging' or not task.get('attempt_id'):
             task=self.reserve_task(task,server,gpu)
         self.runtime_progress(task,'validating','检查数据集与执行环境')
-        remote = self.remote(server)
+        remote = self.run_remote(server,task)
         selected_environment=resolve_environment(task,self.store.get('projects',task['project_id']),server)
         # Validate configured datasets on the selected host before reserving a GPU.
         dataset_paths = {}
@@ -692,7 +824,7 @@ class Engine:
                 raise ValueError('数据集还未在目标服务器完成上传和校验：'+dataset)
             dataset_paths[dataset] = ready['path']
         self.check_task_cancel(task)
-        if self.settings.get('content_store_enabled',True) or task.get('storage_version')==2 or task.get('follow_project_files') or self.code_sources.bound(task['project_id']):
+        if self.settings.get('content_store_enabled',True) or server.get('extra_work_roots') or task.get('storage_version')==2 or task.get('follow_project_files') or self.code_sources.bound(task['project_id']):
             self.prepare_content(task,server,remote,resume)
         else:
             project = self.local_project(task['project_id'])
@@ -756,12 +888,17 @@ class Engine:
         self.runtime_progress(task,'resource_check','传输与校验已完成，复查 GPU 和磁盘资源')
         self.check_task_cancel(task)
         # Refresh resources after potentially lengthy transfers; reapply policy and mask.
-        fresh = remote.call('probe')
+        fresh = self.probe_server(server)
+        if server.get('extra_work_roots'):
+            slot=fresh.get('work_volumes',{}).get(task['work_root'],{})
+            if slot.get('error') or 'free_gb' not in slot:raise ValueError('所选工作盘不可用，请核对挂载')
+            if slot['free_gb'] < server.get('min_disk_gb',5):raise workdirs.WorkDiskFull('所选工作盘低于保留空间')
         fresh['remote_sampled_at']=fresh.get('sampled_at')
         fresh['sampled_at']=time.time()
         with self.store.lock:
             current = self.store.get('servers',server['id'])
-            current.update(snapshot=fresh,connected=True)
+            self.save_work_sample(current,fresh)
+            current['connected']=True
             self.store.put('servers',current)
             others = [t for t in self.store.summaries('tasks') if t['id']!=task['id']]
             decision = choose(task,[current],others,self.settings)
@@ -780,9 +917,10 @@ class Engine:
         task.update(status='running',reason='',remote_state=result)
         task.pop('preparation_retry_at',None);task.pop('preparation_failures',None)
         self.put_runtime_task(task)
+        if server.get('extra_work_roots'):self.remember_work_root(task)
         if task.get('cancel_requested'):remote.call('cancel',spec,timeout=30)
         self.runtime_progress(task,'running','实验已启动，正在执行')
-        self.enqueue('刷新已启动实验的副本清单',self.refresh_replica,task['project_id'],server['id'])
+        self.enqueue('刷新已启动实验的副本清单',self.refresh_replica,task['project_id'],workdirs.endpoint_id(server,task.get('work_root') or server['work_root']))
         self.store.event('启动 '+task['name']+' → '+server['name']+' / GPU '+str(gpu['index']))
 
     def prepare_content(self,task,server,remote,resume=False):
@@ -791,7 +929,7 @@ class Engine:
         self.runtime_progress(task,'hashing','建立输入引用与内容清单，不复制完整前序目录')
         catalog=pool.read_catalog(task['attempt_id'])
         retry_snapshot=task.get('retry_snapshot_attempt')
-        if retry_snapshot and not resume:
+        if retry_snapshot and catalog.get('inputs') is None:
             retained=pool.read_catalog(retry_snapshot)
             if retained.get('inputs') is None:raise ValueError('自动重试的原输入版本缺失，未改用新代码')
             pool.save_catalog(task['attempt_id'],**{k:v for k,v in retained.items() if k in ('inputs','public','read_only_files','dependencies','code_revision','input_revision')})
@@ -823,35 +961,50 @@ class Engine:
         task['content_transfer']=transfer;self.put_runtime_task(task)
 
     def recover(self):
-        for task in self.store.summaries('tasks'):
-            if task['status'] not in ACTIVE or task['id'] in self.runtime_pending:continue
+        active=[t for t in self.store.summaries('tasks') if t['status'] in ACTIVE]
+        if self.background_runtime:
+            start=next((i+1 for i,t in enumerate(active) if t['id']==self.recovery_cursor),0)
+            active=active[start:]+active[:start]
+        now=time.time()
+        for task in active:
+            if task['id'] in self.runtime_pending:continue
+            if task['status']=='lost' and task.get('recovery_check_after',0)>now:continue
+            if task['status'] in ('syncing','sync_failed') and now-task.get('sync_retry_at',0)<30:continue
             if self.background_runtime and len(self.runtime_pending)>=8:break
             task=self.store.get('tasks',task['id'])
             self.submit_runtime(task,self.recover_one)
+            if self.background_runtime:self.recovery_cursor=task['id']
 
     def recover_one(self,task):
         server = self.store.get('servers',task['server_id'])
         if not server.get('connected'):
             return
         try:
+            if task.get('disk_failure'):
+                if time.time()-task.get('sync_retry_at',0)>=30:self.finish_disk_failure(task,server)
+                return
             if task['status'] in ('syncing','sync_failed'):
                 if time.time()-task.get('sync_retry_at',0)>=30:
                     self.finish(task)
                 return
-            result = self.remote(server).call('status',self.spec(task))
+            result = self.run_remote(server,task).call('status',self.spec(task))
             if result.get('interrupted') or result['state'] in ('lost','absent') and task['status']!='staging':
                 from .interruption_recovery import recover
                 if task['status']=='suspended':task['interruption_was_suspended']=True
-                recover(self,task,self.remote(server))
+                recover(self,task,self.run_remote(server,task))
                 return
             if result['state']=='finished':
+                if server.get('extra_work_roots') and result.get('work_disk_full') and result.get('exit_code') and not (result.get('canceled') or task.get('cancel_requested')):
+                    task['exit_code']=result['exit_code']
+                    self.disk_failure(task,server,'实验写入工作盘时空间不足')
+                    return
                 task.update(status='syncing',exit_code=result['exit_code'],remote_finished_at=result.get('finished_at'),reason='实验结束，正在回传全部运行文件',canceled=result.get('canceled',False))
                 self.put_runtime_task(task)
                 self.finish(task)
             elif result['state'] in ('running','starting','paused'):
                 task.update(status='canceling' if task.get('cancel_requested') else 'suspended' if result['state']=='paused' else 'running',reason='运行已暂停；GPU 和显存仍保留' if result['state']=='paused' else '',remote_state=result)
                 self.put_runtime_task(task)
-                if task.get('cancel_requested'):self.remote(server).call('cancel',self.spec(task),timeout=30)
+                if task.get('cancel_requested'):self.run_remote(server,task).call('cancel',self.spec(task),timeout=30)
             elif result['state']=='absent' and task['status']=='staging':
                 with self.store.lock:
                     latest=self.store.get('tasks',task['id'])
@@ -884,7 +1037,7 @@ class Engine:
     def finish(self, task):
         expected_attempt=task.get('attempt_id')
         server = self.store.get('servers',task['server_id'])
-        remote = self.remote(server)
+        remote = self.run_remote(server,task)
         try:
             from .content import Content
             pool=Content(self,task['project_id'])
@@ -925,10 +1078,10 @@ class Engine:
                 task['status']='canceled'
             elif code==0:
                 task['status']='success'
-            elif oom and task['attempts']-task.get('interruption_retries',0) <= task['max_retries']:
+            elif oom and task['attempts']-task.get('interruption_retries',0)-task.get('disk_failed_launches',0) <= task['max_retries']:
                 task['retry_snapshot_attempt']=task['attempt_id']
                 task.update(status='waiting',memory_mb=max(task['memory_mb']+1024,int(task['memory_mb']*1.25)),reason='检测到 OOM/异常退出，已提高显存需求并保留本次结果；有界重试')
-                task['previous_attempts'] = task.get('previous_attempts',[])+[{'attempt_id':task['attempt_id'],'server_id':task['server_id'],'exit_code':code,'synced_at':task['synced_at'],'resolved_conda_env':task.get('resolved_conda_env'),'conda_env_source':task.get('conda_env_source')}]
+                task['previous_attempts'] = task.get('previous_attempts',[])+[{'attempt_id':task['attempt_id'],'server_id':task['server_id'],'work_root':task.get('work_root'),'exit_code':code,'synced_at':task['synced_at'],'resolved_conda_env':task.get('resolved_conda_env'),'conda_env_source':task.get('conda_env_source')}]
                 task.update(server_id=None,attempt_id=None,synced_at=None)
                 task.pop('resolved_conda_env',None);task.pop('conda_env_source',None)
             else:
@@ -942,10 +1095,10 @@ class Engine:
             self.put_runtime_task(task,expected_attempt=expected_attempt)
             self.store.event('回传失败：'+task['name']+' / '+str(exc),'error')
             raise
-        self.enqueue('刷新已回传实验的副本清单',self.refresh_replica,task['project_id'],server['id'])
+        self.enqueue('刷新已回传实验的副本清单',self.refresh_replica,task['project_id'],workdirs.endpoint_id(server,task.get('work_root') or server['work_root']))
 
     def refresh_replica(self, project_id, server_id, job=None):
-        server=self.store.get('servers',server_id)
+        server=self.work_location(server_id)
         remote=self.remote(server)
         spec={'project_id':project_id}
         if self.settings.get('content_store_enabled',True):
@@ -972,7 +1125,7 @@ class Engine:
             value = self.store.get('storage', scope)
         except ValueError:
             return {}
-        return value if value.get('configuration') == configuration(self.store.all('servers'),scope) else {}
+        return value if value.get('configuration') == configuration(self.storage_servers(scope),scope) else {}
 
     def ensure_storage(self,scope='work',job=None):
         with self.lock:
@@ -980,7 +1133,7 @@ class Engine:
 
     def detect_storage(self, scope='work', job=None):
         with self.lock:
-            result = detect(self.store.all('servers'), self.remote, scope)
+            result = detect(self.storage_servers(scope), self.remote, scope)
             self.store.put('storage', result)
             return result
 
@@ -989,7 +1142,7 @@ class Engine:
             self.store.get('projects', project_id)
             if any(t['project_id']==project_id and t['status'] in ACTIVE for t in self.store.all('tasks')):
                 raise ValueError('项目存在运行、回传或状态未知的实验，已拒绝清理')
-            servers = self.store.all('servers')
+            servers = self.storage_servers('work')
             requested = set(server_ids if server_ids is not None else [s['id'] for s in servers])
             if not requested.issubset({s['id'] for s in servers}):
                 raise ValueError('服务器不存在')
@@ -1011,7 +1164,7 @@ class Engine:
                 raise ValueError('工作目录共享，清理也会影响其他服务器，请核对并确认全部受影响服务器')
             if confirmed_server_ids is not None and set(confirmed_server_ids) != set(plan['affected_server_ids']):
                 raise ValueError('共享关系发生变化，请重新预览清理范围')
-            all_servers = {s['id']:s for s in self.store.all('servers')}
+            all_servers = self.work_locations()
             selected=[all_servers[g[0]] for g in plan['groups']]
             if automatic:
                 replicas = self.store.all('replicas')
@@ -1065,7 +1218,7 @@ class Engine:
             for sid in server_ids or []:
                 group=next((g for g in sharing.get('groups',[]) if sid in g),[sid])
                 if seen.intersection(group):continue
-                seen.update(group);self.check_cancel(job);server=self.store.get('servers',sid)
+                seen.update(group);self.check_cancel(job);server=self.work_location(sid)
                 self.progress(job,phase='compacting_server',label='整理服务器历史文件：'+server['name'],bytes=0,total=0)
                 try:
                     value=self.remote(server).cancellable_call('content_compact',{'project_id':project_id},check=lambda:self.check_cancel(job),timeout=86400)
@@ -1080,7 +1233,7 @@ class Engine:
         finally:self.project_storage_busy.discard(project_id)
 
     def scan_content_cache(self,project_id,server_id,job=None):
-        server=self.store.get('servers',server_id)
+        server=self.work_location(server_id)
         value=self.remote(server).cancellable_call('content_scan',{'project_id':project_id},check=lambda:self.check_cancel(job),timeout=86400)
         group=next((g for g in self.current_sharing('work').get('groups',[]) if server_id in g),[server_id])
         for sid in group:self.store.put('content_caches',{'id':project_id+':'+sid,'project_id':project_id,'server_id':sid,**value})
@@ -1092,7 +1245,7 @@ class Engine:
             pid=project['id']
             if pid in self.project_storage_busy or any(t['project_id']==pid and t['status'] in ACTIVE for t in tasks):continue
             if not (self.local_project(pid)/'objects').is_dir():continue
-            for server in self.store.all('servers'):
+            for server in self.storage_servers('work'):
                 if not server.get('connected') or not server.get('enabled'):continue
                 group=next((g for g in self.current_sharing('work').get('groups',[]) if server['id'] in g),[server['id']])
                 if any((pid,sid) in seen for sid in group):continue
@@ -1113,15 +1266,16 @@ class Engine:
         self.progress(job,phase='hashing',label='计算需要的输入与缓存复用计划',bytes=0,total=0)
         inventory,public=pool.build(task,lambda:self.check_cancel(job),save=False)
         unique={v['sha256']:v for v in [*inventory.values(),*public.values()]};servers=[];seen={}
-        for server in self.store.all('servers'):
-            if task['server_ids'] and server['id'] not in task['server_ids']:continue
+        for server in self.storage_servers('work'):
+            if task['server_ids'] and server['host_id'] not in task['server_ids']:continue
             if not server.get('enabled'):continue
             group=next((g for g in self.current_sharing('work').get('groups',[]) if server['id'] in g),[server['id']]);key=tuple(sorted(group))
             if key not in seen:
                 try:seen[key]=self.remote(server).cancellable_call('content_need',{'project_id':task['project_id'],'objects':unique,'dry_run':True},check=lambda:self.check_cancel(job))
                 except Exception as exc:seen[key]={'error':str(exc)}
             report=seen[key];missing=report.get('missing',[])
-            servers.append({'server_id':server['id'],'server_name':server['name'],'shared_server_ids':group,'missing_objects':len(missing),'upload_bytes':sum(unique[h]['size'] for h in missing),'error':report.get('error')})
+            label=server['name']+(' · '+server['work_root'] if server.get('extra_work_roots') else '')
+            servers.append({'server_id':server['host_id'],'server_name':label,'work_root':server['work_root'],'shared_server_ids':group,'missing_objects':len(missing),'upload_bytes':sum(unique[h]['size'] for h in missing),'error':report.get('error')})
         value={'id':task_id,'task_id':task_id,'checked_at':time.time(),'files':inventory,'logical_bytes':sum(v['size'] for v in inventory.values()),'unique_bytes':sum(v['size'] for v in unique.values()),'unique_objects':len(unique),'servers':servers}
         self.store.put('input_plans',value);return {k:v for k,v in value.items() if k!='files'}
 
@@ -1130,10 +1284,12 @@ class Engine:
 
     def auto_cleanup(self,job=None):
         cleaned=set()
+        locations=self.work_locations()
         for replica in self.store.all('replicas'):
             if (replica['project_id'],replica['server_id']) in cleaned:
                 continue
-            server=self.store.get('servers',replica['server_id'])
+            server=locations.get(replica['server_id'])
+            if server is None:continue
             days=server.get('retention_days',7)
             if days<=0 or not replica.get('exists') or not server.get('enabled') or not server.get('connected'):
                 continue

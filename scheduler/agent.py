@@ -80,6 +80,56 @@ def root_path(raw):
     return path.resolve()
 
 
+def disk_sample(path, total, used, free):
+    return {'path':str(path), 'total_bytes':total, 'used_bytes':used, 'free_bytes':free,
+            'used_percent':round(used / total * 100, 1) if total else 0}
+
+
+def work_volume(raw, expected=None):
+    path = root_path(raw)
+    if '.compute-projects' in path.parts:
+        raise ValueError('工作目录不能位于其他受管项目副本内')
+    if not path.is_dir():
+        raise ValueError('工作目录不存在或未挂载')
+    fs = os.statvfs(path)
+    # Different paths on this filesystem share capacity, including bind mounts.
+    device = str(getattr(fs, 'f_fsid', path.stat().st_dev))
+    if expected and device != expected:
+        raise ValueError('工作目录的文件系统已改变，请核对挂载')
+    if not os.access(path, os.W_OK | os.X_OK):
+        raise ValueError('工作目录不可写')
+    block = fs.f_frsize
+    free = fs.f_bavail * block
+    return {**disk_sample(path, fs.f_blocks * block, (fs.f_blocks - fs.f_bfree) * block, free),
+            'device':device, 'free_gb':free / 1024**3}
+
+
+def disk_failure_in_log(workspace, log):
+    """Only attribute an application error to the disk that actually failed."""
+    if not log.is_file():
+        return False
+    with log.open('rb') as stream:
+        stream.seek(max(0, log.stat().st_size - 65536))
+        tail = stream.read().decode('utf-8', 'replace')
+    for line in reversed(tail.splitlines()):
+        if not re.search(r'no space left on device|disk quota exceeded|\bENOSPC\b|\bEDQUOT\b', line, re.I):
+            continue
+        paths = re.findall(r"""['"]([^'"]+)['"]""", line)
+        if not paths:
+            paths = re.findall(r'(?:^|\s)(/[^\s:]+)', line)
+        if paths:
+            target = (workspace / paths[-1]).resolve()
+            return target==workspace.resolve() or workspace.resolve() in target.parents
+        # A pathless exception is ambiguous unless this disk is itself exhausted.
+        return shutil.disk_usage(workspace).free < 4*1024**2
+    return False
+
+
+def work_exhausted(workspace):
+    fs=os.statvfs(workspace)
+    return fs.f_bavail==0 or (fs.f_files>0 and fs.f_favail==0)
+
+
 def project_path(spec, create=False):
     root = root_path(spec['work_root'])
     project_id = spec['project_id']
@@ -324,9 +374,20 @@ def interruption_status(spec):
             'recovery_evidence':{**boot,'previous_boot_id':old_id,'previous_started_at':started,'checked_at':time.time()}}
 
 
-def discard_failed_workspace(spec):
+def discard_failed_workspace(spec, preparing=False):
     run=run_dir(spec);ctrl=run/'_control';state=run_status(spec)
-    if state['state']!='finished' or not (state.get('interrupted') or isinstance(state.get('exit_code'),int) and state['exit_code']!=0):
+    if preparing and state['state']=='absent':
+        incoming=run/'_incoming'
+        if incoming.is_symlink():raise ValueError('上传目录含符号链接')
+        if incoming.is_dir():
+            for part in incoming.iterdir():
+                if not re.fullmatch(r'[a-f0-9]{64}\.upload',part.name) or part.is_symlink() or not part.is_file():
+                    raise ValueError('上传暂存目录包含未知文件')
+                part.unlink()
+            incoming.rmdir()
+        if not (run/'workspace').exists():
+            return {'removed_files':0}
+    elif preparing or state['state']!='finished' or not (state.get('interrupted') or isinstance(state.get('exit_code'),int) and state['exit_code']!=0):
         raise ValueError('仅已确认结束的失败／中断运行可清理，运行或未知状态不会删除')
     workspace=run/'workspace'
     if workspace.is_symlink():raise ValueError('工作目录为符号链接，拒绝清理')
@@ -347,6 +408,7 @@ def discard_failed_workspace(spec):
         db.execute('DELETE FROM files WHERE substr(path,1,?)=?',(len(prefix),prefix))
     receipt={'cleaned_at':time.time(),'removed_workspace_bytes':removed,'removed_files':files,'shared_objects_preserved':True}
     previous=ctrl/'workspace-cleanup.json'
+    if preparing:ctrl.mkdir(exist_ok=True)
     if not previous.exists():atomic(previous,receipt)
     return json.loads(previous.read_text())
 
@@ -382,6 +444,7 @@ def supervise(spec_path):
     try:
         subreaper=enable_subreaper()
         if (ctrl/'cancel').exists():
+            (ctrl/'exit.reserve').unlink(missing_ok=True)
             atomic(ctrl/'exit.json',{'exit_code':143,'finished_at':time.time(),'canceled':True})
             return
         command = ['bash', '-lc', spec['command']]
@@ -393,6 +456,7 @@ def supervise(spec_path):
             identity={'pid':proc.pid,'token':process_token(proc.pid),'supervisor_pid':os.getpid(),'supervisor_token':process_token(os.getpid()),'started_at':time.time(),'control_version':2,'paused':False,'subreaper':subreaper,**boot_identity()}
             atomic(ctrl/'process.json',identity)
             cancel_at=None;paused=False;terminated={}
+            disk_stop=False;next_disk_check=0
             while True:
                 proc.poll()
                 table=process_table();members=family_processes(identity,tracked,table)
@@ -401,7 +465,10 @@ def supervise(spec_path):
                     if pid!=proc.pid and row['ppid']==os.getpid() and row['state']=='Z':
                         try:os.waitpid(pid,os.WNOHANG)
                         except ChildProcessError:pass
-                if (ctrl/'cancel').exists():
+                if spec.get('guard_work') and time.monotonic()>=next_disk_check and proc.returncode is None:
+                    next_disk_check=time.monotonic()+2
+                    disk_stop=disk_stop or work_exhausted(cwd)
+                if disk_stop or (ctrl/'cancel').exists():
                     if cancel_at is None:
                         cancel_at=time.monotonic()
                     # Continue stopped processes so pending TERM can be handled.
@@ -423,9 +490,13 @@ def supervise(spec_path):
                 # Parent exit never proves that its workers have stopped.
                 if proc.returncode is not None and not members:break
                 time.sleep(.25)
-            atomic(ctrl/'exit.json', {'exit_code':proc.returncode,'finished_at':time.time(),'canceled':cancel_at is not None or (ctrl/'cancel').exists()})
+            full = bool(disk_stop or spec.get('guard_work') and proc.returncode and
+                        (disk_failure_in_log(cwd,ctrl/'run.log') or work_exhausted(cwd)))
+            (ctrl/'exit.reserve').unlink(missing_ok=True)
+            atomic(ctrl/'exit.json', {'exit_code':proc.returncode or (1 if disk_stop else 0),'finished_at':time.time(),'canceled':(ctrl/'cancel').exists(),'work_disk_full':full})
     except Exception as exc:
         # Fail closed: do not publish completion while owned workers survive.
+        (ctrl/'exit.reserve').unlink(missing_ok=True)
         if identity:
             signal_family(family_processes(identity,tracked),signal.SIGKILL)
             if proc:proc.wait(timeout=5)
@@ -476,6 +547,8 @@ def control_run(action,spec):
 
 
 def dispatch(action, spec):
+    if spec.get('guard_work') and action not in ('probe','benchmark','conda_envs') and not action.startswith('dataset_') and not (action=='storage_marker' and spec.get('scope')=='data'):
+        work_volume(spec['work_root'],spec.get('expected_volume'))
     if action == 'conda_envs':
         return conda_environments(spec)
     if action == 'storage_marker':
@@ -495,13 +568,31 @@ def dispatch(action, spec):
     if action == 'probe':
         value = probe.status()
         work = root_path(spec['work_root'])
-        work.mkdir(parents=True, exist_ok=True)
+        paths = spec.get('work_paths') or []
+        primary = None
+        if paths:
+            volumes = {}
+            for path in paths:
+                try:
+                    volumes[path] = work_volume(path, spec.get('volume_ids',{}).get(path))
+                    if volumes[path]['path'] == str(work):
+                        primary = volumes[path]
+                except (OSError, ValueError) as exc:
+                    volumes[path] = {'error':str(exc)}
+            value['work_volumes'] = volumes
+        elif spec.get('guard_work'):
+            primary = work_volume(spec['work_root'],spec.get('expected_volume'))
+        else:
+            work.mkdir(parents=True, exist_ok=True)
+            primary = disk_sample(work, *shutil.disk_usage(work))
         data = root_path(spec['data_root'])
         data.mkdir(parents=True, exist_ok=True)
-        value.update(work_free_gb=shutil.disk_usage(work).free/1024**3, data_free_gb=shutil.disk_usage(data).free/1024**3, sampled_at=time.time(), work_root=str(work), data_root=str(data))
-        for key, path in [('work_disk', work), ('data_disk', data)]:
-            disk = shutil.disk_usage(path)
-            value[key] = {'path': str(path), 'total_bytes': disk.total, 'used_bytes': disk.used, 'free_bytes': disk.free, 'used_percent': round(disk.used/disk.total*100, 1) if disk.total else 0}
+        value['data_disk'] = disk_sample(data, *shutil.disk_usage(data))
+        value.update(work_free_gb=0, data_free_gb=value['data_disk']['free_bytes']/1024**3,
+                     sampled_at=time.time(), work_root=str(work), data_root=str(data))
+        if primary:
+            value['work_disk'] = primary
+            value['work_free_gb'] = primary['free_bytes']/1024**3
         return value
     if action == 'benchmark':
         benchmark_index = spec['gpu_index']
@@ -529,6 +620,8 @@ def dispatch(action, spec):
         base = project
         if spec.get('relative'):
             base = safe_child(base, spec['relative'])
+        if spec.get('disk_recovery_logs') and spec.get('relative')=='runs/'+spec['attempt_id']+'/_control':
+            return tree_manifest(base)
         if (project/'objects').is_dir():return object_agent.manifest_cached(project,base)
         return tree_manifest(base)
     if action == 'prepare':
@@ -553,9 +646,20 @@ def dispatch(action, spec):
         # Idempotent launch prevents duplicate jobs after an ambiguous SSH response.
         fd = os.open(str(ctrl/'launch.lock'), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         os.close(fd)
-        atomic(ctrl/'spec.json', spec)
-        with open(os.devnull, 'wb') as null:
-            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'supervise', str(ctrl/'spec.json')], stdin=subprocess.DEVNULL, stdout=null, stderr=null, start_new_session=True)
+        try:
+            if spec.get('guard_work'):
+                # Released before publishing exit.json if the workload fills the filesystem.
+                with (ctrl/'exit.reserve').open('wb') as reserve:
+                    reserve.write(bytes(256*1024))
+                    reserve.flush()
+                    os.fsync(reserve.fileno())
+            atomic(ctrl/'spec.json', spec)
+            with open(os.devnull, 'wb') as null:
+                subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'supervise', str(ctrl/'spec.json')], stdin=subprocess.DEVNULL, stdout=null, stderr=null, start_new_session=True)
+        except OSError:
+            (ctrl/'exit.reserve').unlink(missing_ok=True)
+            (ctrl/'launch.lock').unlink()
+            raise
         return {'state': 'starting'}
     if action == 'status':
         return run_status(spec)
@@ -571,6 +675,8 @@ def dispatch(action, spec):
         return run_status(spec)
     if action == 'discard_failed_workspace':
         return discard_failed_workspace(spec)
+    if action == 'discard_unstarted_workspace':
+        return discard_failed_workspace(spec, preparing=True)
     if action in ('cancel','pause','resume'):
         return control_run(action,spec)
     if action == 'log':
@@ -674,5 +780,6 @@ if __name__ == '__main__':
             result = dispatch(sys.argv[1], json.load(sys.stdin))
             print(json.dumps({'ok': True, 'result': result}))
         except Exception as exc:
-            print(json.dumps({'ok': False, 'error': str(exc)}))
+            print(json.dumps({'ok': False, 'error': str(exc), 'work_disk_full':isinstance(exc,OSError)
+                              and exc.errno in (28,122) and sys.argv[1] in ('content_prepare','content_need','content_commit','content_assemble','prepare','commit','launch')}))
             sys.exit(1)
